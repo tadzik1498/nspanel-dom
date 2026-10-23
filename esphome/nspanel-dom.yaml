@@ -1,0 +1,3256 @@
+# =====================================================================
+#  NSPanel Dom - dynamiczny panel domu dla Sonoff NSPanel EU (ESPHome)
+#  v1.14 - G13: zamiast paska dnia trzeci (zewnetrzny) pierscien = tarcza 24 h ze strefami,
+#          znacznikami godzin, cyframi 0/6/12/18 i wskazowka "teraz"
+#  v1.13 - czytelnosc dla seniora: G13 z gruba ramka w kolorze strefy, duze wartosci,
+#          znaczniki godzin na pasku dnia; Dom: pelny domek z gruba obwodka, dwa
+#          ujednolicone rozmiary wartosci; korytarz: zgas po 30 s (domyslnie)
+#  v1.12 - kafelki G13 i Dom na tle nieba spojnym z pogoda (pasma wg pogody i pory dnia),
+#          tekst przezroczysty z cieniem jak na kafelku pogody
+#  v1.11 - kafelek "Dom" (domek: temp. na dachu, w domu, klima, moc; typ V z opcja dom,
+#          encja sensor.panel_dom_dane, dotkniecie = sterowanie klimatyzacja)
+#  v1.10 - kafelek "Prad G13" (typ V z opcja g13, encja sensor.nspanel_g13_data),
+#          kolejka komend Nextion 800, odswiezanie kafelkow V co minute
+#  v1.9 - odliczanie w oknie ({s} w tresci), okno przy wlaczeniu swiatla na korytarzu
+#
+#  Idea:
+#   - wykrywanie encji i sugestie robi Home Assistant (pakiet
+#     nspanel_dom_ha.yaml), panel dostaje gotowy katalog
+#     pomieszczen -> encji przez akcje API (begin/area/done/state)
+#   - nic nie jest wkompilowane na sztywno: zmiana pomieszczen,
+#     nowe encje, zmiana przypisan = bez ponownego flashowania
+#   - wybor encji (sugerowane / dodane / ukryte) i przeniesienie
+#     encji do innego pomieszczenia robi sie NA PANELU (Edytuj),
+#     zapis w pamieci flash panelu
+#   - UI rysowane z ESP prymitywami Nextion (fill/xstr/cirs),
+#     TFT zawiera tylko jedna pusta strone + 4 fonty + kod dotyku
+#
+#  TFT (jednorazowo, Nextion Editor, Windows):
+#   1. New project, model NX4832F035_011, kierunek Horizontal 0 (480x320)
+#   2. Tools > Font Generator, kodowanie iso-8859-2, dodaj w kolejnosci:
+#        font 0: 16 px, font 1: 24 px, font 2: 32 px,
+#        font 3: 56 px bold (Arial Bold - liczby w kafelkach),
+#        font 4: 72 px bold (Arial Bold - zegar i temp. zewnetrzna)
+#   3. page0: bez komponentow, sta = solid color, bco = 2146
+#   4. page0 > Touch Press Event:
+#        sys0=tch0/30
+#        sys1=tch1/20
+#        sys2=sys1*16
+#        sys2+=sys0
+#        printh 65 00
+#        prints sys2,1
+#        printh 01 ff ff ff
+#   5. page0 > Touch Release Event:
+#        printh 65 00 00 00 ff ff ff
+#   6. File > TFT file output -> nspanel_dom.tft
+#      skopiuj do HA: /config/www/nspanel/nspanel_dom.tft
+#   7. Po wgraniu tego firmware: w HA przycisk "Wgraj TFT"
+#
+#  Siatka dotyku: 16 kolumn x 16 wierszy (30 x 20 px), numer komorki
+#  przychodzi jako component_id w zdarzeniu on_touch.
+#
+#  W HA: Ustawienia > Urzadzenia > ESPHome > NSPanel Dom > Konfiguruj
+#  -> zaznacz "Allow the device to perform Home Assistant actions".
+# =====================================================================
+
+substitutions:
+  name: nspanel-dom
+  # uklad startowy ekranu glownego (ten sam co domyslny w HA); zastepuje go uklad z edytora
+  e_temp_dom: sensor.YOUR_INDOOR_TEMPERATURE
+  e_klima: climate.YOUR_CLIMATE
+  e_moc: sensor.YOUR_POWER_W
+  moc_max: "2700"
+  e_temp_dach: sensor.YOUR_OUTDOOR_TEMPERATURE
+  friendly: NSPanel Dom
+  # TFT z HA (/config/www/nspanel/) albo z PC: w folderze z plikiem
+  # uruchom "python -m http.server 8000" i uzyj http://<PC-IP>:8000/nspanel_dom.tft
+  tft_url: http://homeassistant.local:8123/local/nspanel/nspanel_dom.tft
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly}
+  on_boot:
+    - priority: 800
+      then:
+        - lambda: |-
+            // ---------------- palette (RGB565) ----------------
+            // BG 2146  BAR 6372  TILE 10599  TXT 61278  DIM 35988
+            // DARK 4226  AMBER 64900  TEAL 11828  ORANGE 64359
+            // BLUE 17599  PURPLE 37919  RED 60042  GREEN 17997  BTN 14858
+
+            // ---------------- basic helpers ----------------
+            id(f_hash) = [](const std::string &s) -> uint32_t {
+              uint32_t h = 2166136261u;
+              for (unsigned char c : s) { h ^= c; h *= 16777619u; }
+              h &= 0x7FFFFFFFu;
+              return h ? h : 1u;
+            };
+
+            // UTF-8 -> ISO-8859-2 (fonts in TFT), quote-safe, length-capped
+            id(f_txt) = [](const std::string &s, size_t maxlen) -> std::string {
+              static const char keep[] = "\xA0\xA4\xA7\xA8\xAD\xB0\xB4\xB8\xC1\xC2\xC4\xC7\xC9\xCB\xCD\xCE\xD3\xD4\xD6\xD7\xDA\xDC\xDD\xDF\xE1\xE2\xE4\xE7\xE9\xEB\xED\xEE\xF3\xF4\xF6\xF7\xFA\xFC\xFD";
+              std::string o;
+              size_t i = 0;
+              while (i < s.size() && o.size() < maxlen) {
+                uint8_t c = (uint8_t) s[i];
+                uint32_t cp;
+                size_t n;
+                if (c < 0x80) { cp = c; n = 1; }
+                else if ((c & 0xE0) == 0xC0 && i + 1 < s.size()) { cp = ((c & 0x1F) << 6) | ((uint8_t) s[i + 1] & 0x3F); n = 2; }
+                else if ((c & 0xF0) == 0xE0 && i + 2 < s.size()) { cp = ((c & 0x0F) << 12) | (((uint8_t) s[i + 1] & 0x3F) << 6) | ((uint8_t) s[i + 2] & 0x3F); n = 3; }
+                else if ((c & 0xF8) == 0xF0 && i + 3 < s.size()) { cp = 0xFFFF; n = 4; }
+                else { cp = '?'; n = 1; }
+                i += n;
+                char r = '?';
+                if (cp == '"') r = '\'';
+                else if (cp == '\\') r = '/';
+                else if (cp < 0x20) r = ' ';
+                else if (cp < 0x7F) r = (char) cp;
+                else {
+                  switch (cp) {
+                    case 0x104: r = '\xA1'; break;  case 0x105: r = '\xB1'; break;
+                    case 0x106: r = '\xC6'; break;  case 0x107: r = '\xE6'; break;
+                    case 0x118: r = '\xCA'; break;  case 0x119: r = '\xEA'; break;
+                    case 0x141: r = '\xA3'; break;  case 0x142: r = '\xB3'; break;
+                    case 0x143: r = '\xD1'; break;  case 0x144: r = '\xF1'; break;
+                    case 0x15A: r = '\xA6'; break;  case 0x15B: r = '\xB6'; break;
+                    case 0x179: r = '\xAC'; break;  case 0x17A: r = '\xBC'; break;
+                    case 0x17B: r = '\xAF'; break;  case 0x17C: r = '\xBF'; break;
+                    case 0x2013: case 0x2014: r = '-'; break;
+                    default:
+                      if (cp >= 0xA0 && cp <= 0xFF && strchr(keep, (char) cp) != nullptr) r = (char) cp;
+                  }
+                }
+                o += r;
+              }
+              return o;
+            };
+
+            // count UTF-8 code points
+            id(f_len) = [](const std::string &s) -> int {
+              int n = 0;
+              for (unsigned char c : s) if ((c & 0xC0) != 0x80) n++;
+              return n;
+            };
+
+            // split name into two lines of max maxc characters
+            id(f_split) = [](const std::string &s, int maxc, std::string &l1, std::string &l2) {
+              std::vector<size_t> pos;
+              for (size_t i = 0; i < s.size(); i++) if (((uint8_t) s[i] & 0xC0) != 0x80) pos.push_back(i);
+              int n = pos.size();
+              if (n <= maxc) { l1 = s; l2 = ""; return; }
+              int cut = -1;
+              for (int k = maxc; k > 0; k--) if (s[pos[k]] == ' ') { cut = k; break; }
+              if (cut < 0) cut = maxc;
+              l1 = s.substr(0, pos[cut]);
+              std::string rest = s.substr(pos[cut]);
+              while (!rest.empty() && rest[0] == ' ') rest.erase(0, 1);
+              std::vector<size_t> p2;
+              for (size_t i = 0; i < rest.size(); i++) if (((uint8_t) rest[i] & 0xC0) != 0x80) p2.push_back(i);
+              if ((int) p2.size() > maxc) rest = rest.substr(0, p2[maxc - 1]) + ".";
+              l2 = rest;
+            };
+
+            // n-th field of "a/b/c"
+            id(f_part) = [](const std::string &s, int n) -> std::string {
+              size_t st = 0;
+              for (int k = 0; k < n; k++) {
+                size_t p = s.find('/', st);
+                if (p == std::string::npos) return "";
+                st = p + 1;
+              }
+              size_t e = s.find('/', st);
+              return s.substr(st, e == std::string::npos ? std::string::npos : e - st);
+            };
+
+            // number formatting: 21.537 -> 21.5, 1234.5 -> 1235
+            id(f_fmt) = [](const std::string &s) -> std::string {
+              if (s.empty() || s.find('.') == std::string::npos) return s;
+              char *end = nullptr;
+              float v = strtof(s.c_str(), &end);
+              if (end == s.c_str() || *end != 0) return s;
+              char b[24];
+              if (fabsf(v) >= 100.0f) snprintf(b, sizeof(b), "%.0f", v);
+              else snprintf(b, sizeof(b), "%.1f", v);
+              return std::string(b);
+            };
+
+            // ---------------- drawing primitives (paced queue) ----------------
+            // logical x (0..480) -> physical x (0..p_uiw): keeps the UI inside the visible glass area
+            id(f_sx) = [](int x) -> int { return x * id(p_uiw) / 480; };
+            id(f_cmd) = [](const std::string &c) {
+              if (id(q_cmd).size() < 800) id(q_cmd).push_back(c);
+            };
+            id(f_fill) = [](int x, int y, int w, int h, int c) {
+              char b[48];
+              int px = id(f_sx)(x), pw = id(f_sx)(x + w) - px;
+              snprintf(b, sizeof(b), "fill %d,%d,%d,%d,%d", px, y, pw, h, c);
+              id(f_cmd)(b);
+            };
+            id(f_circ) = [](int x, int y, int r, int c) {
+              char b[40];
+              snprintf(b, sizeof(b), "cirs %d,%d,%d,%d", id(f_sx)(x), y, r, c);
+              id(f_cmd)(b);
+            };
+            // xstr x,y,w,h,font,pco,bco,xcen,ycen,sta,"txt"  (xc: 0 left, 1 center, 2 right)
+            id(f_str) = [](int x, int y, int w, int h, int font, int fg, int bg, int xc, const std::string &t) {
+              std::string s = id(f_txt)(t, 40);
+              char b[160];
+              int px = id(f_sx)(x), pw = id(f_sx)(x + w) - px;
+              snprintf(b, sizeof(b), "xstr %d,%d,%d,%d,%d,%d,%d,%d,1,1,\"%s\"", px, y, pw, h, font, fg, bg, xc, s.c_str());
+              id(f_cmd)(b);
+            };
+
+            // ---------------- entity model ----------------
+            id(f_dom) = [](int i) -> std::string {
+              const std::string &e = id(g_eid)[i];
+              return e.substr(0, e.find('.'));
+            };
+
+            id(f_on) = [](int i) -> bool {
+              std::string d = id(f_dom)(i);
+              const std::string &s = id(g_st)[i];
+              if (d == "climate") return s != "off" && s != "unavailable" && s != "unknown";
+              if (d == "cover") return s == "open" || s == "opening";
+              if (d == "lock") return s == "unlocked" || s == "open";
+              if (d == "media_player") return s == "playing";
+              return s == "on";
+            };
+
+            id(f_val) = [](int i) -> std::string {
+              std::string d = id(f_dom)(i);
+              const std::string &s = id(g_st)[i];
+              const std::string &x = id(g_ex)[i];
+              if (s == "unavailable" || s == "unknown") return "n/d";
+              if (d == "light") {
+                if (s != "on") return "Wył.";
+                if (!x.empty() && x != "0") return x + "%";
+                return "Wł.";
+              }
+              if (d == "switch" || d == "input_boolean" || d == "fan") return s == "on" ? "Wł." : "Wył.";
+              if (d == "climate") {
+                std::string c = id(f_part)(x, 0);
+                if (!c.empty()) return id(f_fmt)(c) + "°";
+                return s;
+              }
+              if (d == "cover") {
+                if (!x.empty()) return x + "%";
+                if (s == "open") return "Otwarte";
+                if (s == "closed") return "Zamknięte";
+                if (s == "opening") return "Otwiera";
+                if (s == "closing") return "Zamyka";
+                return s;
+              }
+              if (d == "binary_sensor") {
+                if (x == "door" || x == "window" || x == "opening" || x == "garage_door") return s == "on" ? "Otwarte" : "Zamknięte";
+                if (x == "motion" || x == "occupancy" || x == "presence") return s == "on" ? "Ruch" : "Brak";
+                return s == "on" ? "Wł." : "Wył.";
+              }
+              if (d == "lock") return s == "locked" ? "Zamknięty" : (s == "unlocked" ? "Otwarty" : s);
+              if (d == "media_player") {
+                if (s == "playing") return "Gra";
+                if (s == "paused") return "Pauza";
+                if (s == "off") return "Wył.";
+                if (s == "idle") return "Czeka";
+                return s;
+              }
+              if (d == "script") return s == "on" ? "Działa" : "";
+              if (d == "scene") return "";
+              std::string v = id(f_fmt)(s);
+              if (!x.empty()) {
+                if (x == "%" || (uint8_t) x[0] == 0xC2) v += x;
+                else v += " " + x;
+              }
+              return v;
+            };
+
+            id(f_col) = [](int i) -> int {
+              if (!id(f_on)(i)) return 10599;
+              std::string d = id(f_dom)(i);
+              if (d == "light") return 64900;
+              if (d == "climate") {
+                std::string a = id(f_part)(id(g_ex)[i], 2);
+                if (a == "heating") return 64359;
+                if (a == "cooling") return 17599;
+                return 11828;
+              }
+              if (d == "cover") return 37919;
+              if (d == "binary_sensor" || d == "lock") return 60042;
+              return 11828;
+            };
+
+            // ---------------- selection + room overrides (flash) ----------------
+            // p_sel: h = shown although not suggested, h|0x80000000 = hidden although suggested
+            id(f_shown) = [](int i) -> bool {
+              uint32_t h = id(f_hash)(id(g_eid)[i]);
+              for (int k = 0; k < 64; k++) {
+                if (id(p_sel)[k] == h) return true;
+                if (id(p_sel)[k] == (h | 0x80000000u)) return false;
+              }
+              return id(g_sug)[i] != 0;
+            };
+            id(f_setshown) = [](int i, bool on) {
+              uint32_t h = id(f_hash)(id(g_eid)[i]);
+              for (int k = 0; k < 64; k++) if ((id(p_sel)[k] & 0x7FFFFFFFu) == h) id(p_sel)[k] = 0;
+              bool sug = id(g_sug)[i] != 0;
+              if (on == sug) return;
+              for (int k = 0; k < 64; k++) {
+                if (id(p_sel)[k] == 0) { id(p_sel)[k] = on ? h : (h | 0x80000000u); return; }
+              }
+              ESP_LOGW("dom", "Selection table full (64)");
+            };
+            id(f_move) = [](int i, int a) {
+              uint32_t h = id(f_hash)(id(g_eid)[i]);
+              for (int k = 0; k < 32; k++) if (id(p_mve)[k] == h) { id(p_mve)[k] = 0; id(p_mva)[k] = 0; }
+              if (a != id(g_area0)[i]) {
+                bool ok = false;
+                for (int k = 0; k < 32; k++) {
+                  if (id(p_mve)[k] == 0) { id(p_mve)[k] = h; id(p_mva)[k] = id(f_hash)(id(a_name)[a]); ok = true; break; }
+                }
+                if (!ok) { ESP_LOGW("dom", "Move table full (32)"); return; }
+                id(g_sug)[i] = 1;
+              } else {
+                id(g_sug)[i] = id(g_sug0)[i];
+              }
+              id(g_area)[i] = a;
+              id(f_setshown)(i, true);
+            };
+            id(f_apply) = []() {
+              int n = id(g_eid).size();
+              int na = id(a_name).size();
+              for (int i = 0; i < n; i++) {
+                uint32_t h = id(f_hash)(id(g_eid)[i]);
+                for (int k = 0; k < 32; k++) {
+                  if (id(p_mve)[k] != h) continue;
+                  for (int a = 0; a < na; a++) {
+                    if (id(f_hash)(id(a_name)[a]) == id(p_mva)[k]) { id(g_area)[i] = a; id(g_sug)[i] = 1; break; }
+                  }
+                  break;
+                }
+              }
+            };
+            id(f_room) = [](int a, bool shown) -> std::vector<int> {
+              std::vector<int> r;
+              for (int i = 0; i < (int) id(g_eid).size(); i++) {
+                if (id(g_area)[i] == a && (!shown || id(f_shown)(i))) r.push_back(i);
+              }
+              return r;
+            };
+
+            // ---------------- UI parts ----------------
+            id(f_top) = [](const std::string &t, const std::string &l, const std::string &r) {
+              id(f_fill)(0, 0, 480, 40, 6372);
+              id(f_str)(0, 0, 60, 40, 1, 61278, 6372, 1, l);
+              id(f_str)(60, 0, 360, 40, 1, 61278, 6372, 1, t);
+              id(f_str)(420, 0, 60, 40, 1, 61278, 6372, 1, r);
+            };
+            id(f_bot) = [](const std::string &l, const std::string &c, const std::string &r, bool cbtn) {
+              id(f_fill)(0, 278, 480, 42, 2146);
+              if (!l.empty()) id(f_str)(4, 282, 112, 36, 0, 61278, 14858, 1, l);
+              id(f_str)(120, 282, 240, 36, 0, cbtn ? 61278 : 35988, cbtn ? 14858 : 2146, 1, c);
+              if (!r.empty()) id(f_str)(364, 282, 112, 36, 0, 61278, 14858, 1, r);
+            };
+
+            // tile slot 0..5 on dashboard (3 x 2)
+            id(f_tile) = [](int s) {
+              int k = id(v_tpage) * 6 + s;
+              int x = 4 + (s % 3) * 159, y = 44 + (s / 3) * 118, w = 153, h = 112;
+              if (k >= (int) id(v_list).size()) return;
+              int i = id(v_list)[k];
+              bool on = id(f_on)(i);
+              int bg = id(f_col)(i);
+              int fg = on ? 4226 : 61278;
+              int dim = on ? 4226 : 35988;
+              std::string d = id(f_dom)(i);
+              id(f_fill)(x, y, w, h, bg);
+              if (d == "sensor") id(f_fill)(x + 12, y + 13, 14, 14, dim);
+              else id(f_circ)(x + 20, y + 20, 9, dim);
+              std::string v = id(f_val)(i);
+              id(f_str)(x + 36, y + 4, w - 42, 34, id(f_len)(v) <= 7 ? 1 : 0, fg, bg, 2, v);
+              if (d == "climate") {
+                std::string t = id(f_part)(id(g_ex)[i], 1);
+                if (!t.empty() && t != "None") id(f_str)(x + 36, y + 40, w - 42, 20, 0, dim, bg, 2, "cel " + id(f_fmt)(t) + "°");
+              }
+              std::string l1, l2;
+              id(f_split)(id(g_name)[i], 17, l1, l2);
+              if (l2.empty()) {
+                id(f_str)(x + 8, y + h - 28, w - 14, 24, 0, fg, bg, 0, l1);
+              } else {
+                id(f_str)(x + 8, y + h - 50, w - 14, 22, 0, fg, bg, 0, l1);
+                id(f_str)(x + 8, y + h - 27, w - 14, 22, 0, fg, bg, 0, l2);
+              }
+            };
+
+            // ---------------- home overview: weather scene + big values ----------------
+            // weather group: 0 clear 1 partly 2 cloudy 3 fog 4 rain 5 storm 6 snow 7 wind
+            id(f_grp) = [](const std::string &w) -> int {
+              if (w == "partlycloudy") return 1;
+              if (w == "cloudy") return 2;
+              if (w == "fog") return 3;
+              if (w == "rainy" || w == "pouring" || w == "hail" || w == "snowy-rainy") return 4;
+              if (w == "lightning" || w == "lightning-rainy") return 5;
+              if (w == "snowy") return 6;
+              if (w == "windy" || w == "windy-variant") return 7;
+              return 0;
+            };
+            id(f_wgrp) = []() -> int { return id(f_grp)(id(o_wx)); };
+            // time of day from sun elevation: 0 night 1 dusk 2 day
+            id(f_tcls) = []() -> int {
+              float e = id(o_elev);
+              return e < -4.0f ? 0 : (e < 6.0f ? 1 : 2);
+            };
+            id(f_pal) = []() -> int { return id(f_tcls)() * 10 + id(f_wgrp)(); };
+            id(f_rgb) = [](int r, int g, int b) -> int {
+              r = r < 0 ? 0 : (r > 255 ? 255 : r);
+              g = g < 0 ? 0 : (g > 255 ? 255 : g);
+              b = b < 0 ? 0 : (b > 255 ? 255 : b);
+              return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+            };
+            // sky band color 0..15 (20 px each)
+            id(f_sky) = [](int band) -> int {
+              static const int top[8][3] = {{30,100,190},{50,105,170},{80,92,110},{105,110,118},{45,55,72},{28,26,45},{90,105,125},{55,110,170}};
+              static const int bot[8][3] = {{90,155,215},{110,150,195},{125,135,150},{150,155,160},{85,95,110},{65,58,80},{145,155,170},{115,155,190}};
+              int g = id(f_wgrp)(), t = id(f_tcls)();
+              bool clearish = (g == 0 || g == 1 || g == 7);
+              float a[3], b[3];
+              for (int k = 0; k < 3; k++) { a[k] = top[g][k]; b[k] = bot[g][k]; }
+              if (t == 1) {
+                if (clearish) { a[0] = 40; a[1] = 45; a[2] = 100; b[0] = 215; b[1] = 115; b[2] = 70; }
+                else for (int k = 0; k < 3; k++) { a[k] *= 0.6f; b[k] *= 0.6f; }
+              } else if (t == 0) {
+                if (clearish) { a[0] = 4; a[1] = 8; a[2] = 26; b[0] = 22; b[1] = 32; b[2] = 66; }
+                else for (int k = 0; k < 3; k++) { a[k] *= 0.3f; b[k] *= 0.3f; }
+              }
+              float f = band / 15.0f;
+              return id(f_rgb)((int) (a[0] + (b[0] - a[0]) * f), (int) (a[1] + (b[1] - a[1]) * f), (int) (a[2] + (b[2] - a[2]) * f));
+            };
+            id(f_line) = [](int x0, int y0, int x1, int y1, int c) {
+              char b[48];
+              snprintf(b, sizeof(b), "line %d,%d,%d,%d,%d", id(f_sx)(x0), y0, id(f_sx)(x1), y1, c);
+              id(f_cmd)(b);
+            };
+            // transparent text with drop shadow (xstr sta=3)
+            id(f_strt) = [](int x, int y, int w, int h, int font, int fg, int xc, const std::string &t) {
+              std::string s = id(f_txt)(t, 40);
+              char b[160];
+              int px = id(f_sx)(x), pw = id(f_sx)(x + w) - px;
+              snprintf(b, sizeof(b), "xstr %d,%d,%d,%d,%d,0,0,%d,1,3,\"%s\"", px + 2, y + 2, pw, h, font, xc, s.c_str());
+              id(f_cmd)(b);
+              snprintf(b, sizeof(b), "xstr %d,%d,%d,%d,%d,%d,0,%d,1,3,\"%s\"", px, y, pw, h, font, fg, xc, s.c_str());
+              id(f_cmd)(b);
+            };
+            // ---------------- home layout (built in the HA editor) ----------------
+            // grid 24 x 16 cells of 20 px (logical 480 x 320); tile rect = cells minus 2 px margin
+            // types: W weather, C clock, V value, B value + bar, T toggle, K climate
+            //        (V with opt2 "g13" = G13 tariff tile, drawn by f_g13)
+            //        (V with opt2 "dom" = house tile, drawn by f_dtile)
+            id(f_trect) = [](int i, int &x, int &y, int &w, int &h) {
+              x = id(lt_c)[i] * 20 + 2; y = id(lt_r)[i] * 20 + 2;
+              w = id(lt_w)[i] * 20 - 4; h = id(lt_h)[i] * 20 - 4;
+            };
+            // largest font <= maxf whose text fits the box; per-glyph Arial advance widths (em units)
+            // fonts 0-2 regular, 3-4 bold; em ~= 0.87 * font height
+            id(f_fit) = [](const std::string &t, int maxw, int maxh, int maxf) -> int {
+              static const int fh[5] = {16, 24, 32, 56, 72};
+              maxw = maxw * id(p_uiw) / 480;  // boxes are squeezed to the visible width, fonts are not
+              for (int f = maxf; f > 0; f--) {
+                if (fh[f] > maxh) continue;
+                bool bold = f >= 3;
+                float em = 0;
+                for (size_t i = 0; i < t.size(); i++) {
+                  uint8_t c = (uint8_t) t[i];
+                  if ((c & 0xC0) == 0x80) continue;
+                  float k;
+                  if (c >= '0' && c <= '9') k = 0.556f;
+                  else if (c == '.' || c == ',' || c == ' ' || c == ';') k = 0.278f;
+                  else if (c == ':') k = bold ? 0.333f : 0.278f;
+                  else if (c == 0xC2 && i + 1 < t.size() && (uint8_t) t[i + 1] == 0xB0) k = 0.4f;
+                  else if (c == '-') k = 0.333f;
+                  else if (c == '%') k = 0.889f;
+                  else if (strchr("iljI|!'", c)) k = bold ? 0.278f : 0.222f;
+                  else if (strchr("tfr", c)) k = bold ? 0.36f : 0.3f;
+                  else if (c == 'm') k = bold ? 0.889f : 0.833f;
+                  else if (c == 'w') k = bold ? 0.778f : 0.722f;
+                  else if (c == 'M') k = 0.833f;
+                  else if (c == 'W') k = 0.944f;
+                  else if (c >= 'a' && c <= 'z') k = bold ? 0.6f : 0.54f;
+                  else if (c >= 'A' && c <= 'Z') k = bold ? 0.72f : 0.68f;
+                  else k = bold ? 0.6f : 0.56f;
+                  em += k;
+                }
+                if (em * fh[f] * 0.87f <= maxw) return f;
+              }
+              return 0;
+            };
+            // weather tile zones from its height (priority: clock, temp, condition, info)
+            id(f_wzones) = []() {
+              id(wz_clock) = id(wz_cond) = id(wz_temp) = id(wz_info) = -1;
+              if (id(wr_w) <= 0) return;
+              int avail = id(wr_h) - 36;
+              bool cl = !id(wr_noclock) && avail >= 72; if (cl) avail -= 72;
+              int th = avail >= 80 ? 80 : (avail >= 56 ? avail : 0);
+              avail -= th;
+              bool cd = avail >= 30; if (cd) avail -= 30;
+              id(wz_infon) = avail >= 84 ? 3 : (avail >= 32 ? 1 : 0);
+              bool inf = id(wz_infon) > 0;
+              int y = id(wr_y) + 36;
+              if (cl) { id(wz_clock) = y; y += 72; }
+              if (cd) { id(wz_cond) = y; y += 30; }
+              if (th > 0) { id(wz_temp) = y; id(wz_temph) = th; y += th; }
+              if (inf) id(wz_info) = y;
+            };
+            // sky + particles clipped to rect and to the weather tile (deterministic, partial redraws match)
+            id(f_bg) = [](int x, int y, int w, int h) {
+              int X = id(wr_x), Y = id(wr_y), W = id(wr_w), H = id(wr_h);
+              if (W <= 0) return;
+              int xa = std::max(x, X), xb = std::min(x + w, X + W), ya = std::max(y, Y), yb = std::min(y + h, Y + H);
+              if (xb <= xa || yb <= ya) return;
+              x = xa; y = ya; w = xb - xa; h = yb - ya;
+              for (int band = 0; band < 16; band++) {
+                int b0 = Y + band * H / 16, b1 = Y + (band + 1) * H / 16;
+                int y0 = std::max(y, b0), y1 = std::min(y + h, b1);
+                if (y1 > y0) id(f_fill)(x, y0, w, y1 - y0, id(f_sky)(band));
+              }
+              if (W < 20 || H < 60) return;
+              const std::string &w0 = id(o_wx);
+              int g = id(f_wgrp)(), t = id(f_tcls)();
+              int kind = 0, cnt = 0;
+              int area = W * H / 1000;
+              if (g == 4) { kind = 1; cnt = (w0 == "pouring") ? area * 9 / 10 : area / 2; }
+              else if (g == 5) { kind = 1; cnt = (w0 == "lightning-rainy") ? area * 6 / 10 : 0; }
+              else if (g == 6) { kind = 2; cnt = area / 2; }
+              else if (g == 3) { kind = 4; cnt = area / 5; }
+              else if (g == 7) { kind = 4; cnt = area / 6; }
+              else if (t == 0 && g == 0) { kind = 3; cnt = area / 3; }
+              if (cnt > 70) cnt = 70;
+              int crain = id(f_rgb)(150, 175, 205), csnow = id(f_rgb)(240, 245, 255);
+              int cstar = id(f_rgb)(225, 225, 200), cstreak = id(f_rgb)(185, 192, 200);
+              uint32_t r = 20260928u;
+              for (int n = 0; n < cnt; n++) {
+                r = r * 1103515245u + 12345u; int px = X + 4 + (r >> 8) % (W - 8);
+                r = r * 1103515245u + 12345u; int py = Y + 40 + (r >> 8) % (H - 44);
+                int k = kind;
+                if (w0 == "snowy-rainy") k = (n & 1) ? 2 : 1;
+                int x0 = px, y0 = py, x1 = px, y1 = py;
+                if (k == 1) { x1 = px - 3; y1 = py + 9; }
+                else if (k == 4) { x1 = px + 18; }
+                else if (k == 3 && py > Y + H / 2) continue;
+                int lx = std::min(x0, x1) - 2, rx = std::max(x0, x1) + 2, ty = std::min(y0, y1) - 2, by = std::max(y0, y1) + 2;
+                if (lx < x || rx >= x + w || ty < y || by >= y + h) continue;
+                if (k == 1) id(f_line)(x0, y0, x1, y1, crain);
+                else if (k == 2) id(f_circ)(px, py, 2, csnow);
+                else if (k == 3) id(f_circ)(px, py, 1, cstar);
+                else if (k == 4) id(f_line)(x0, y0, x1, y1, cstreak);
+              }
+            };
+            // sky colour at screen row y: bands of the weather tile (or the whole screen without it)
+            id(f_skyy) = [](int y) -> int {
+              int Y = id(wr_y), H = id(wr_h);
+              if (id(wr_w) <= 0 || H <= 0) { Y = 0; H = 320; }
+              int band = (y - Y) * 16 / H;
+              band = band < 0 ? 0 : (band > 15 ? 15 : band);
+              return id(f_sky)(band);
+            };
+            // rectangle filled with the sky bands aligned to the weather tile (G13 / Dom tiles)
+            id(f_skyfill) = [](int x, int y, int w, int h) {
+              int Y = id(wr_y), H = id(wr_h);
+              if (id(wr_w) <= 0 || H <= 0) { Y = 0; H = 320; }
+              for (int band = 0; band < 16; band++) {
+                int b0 = band == 0 ? -1000 : Y + band * H / 16, b1 = band == 15 ? 1000 : Y + (band + 1) * H / 16;
+                int y0 = std::max(y, b0), y1 = std::min(y + h, b1);
+                if (y1 > y0) id(f_fill)(x, y0, w, y1 - y0, id(f_sky)(band));
+              }
+            };
+            // sun / moon / clouds / lightning, only in the top 36 px of the weather tile
+            id(f_decor) = []() {
+              int X = id(wr_x), Y = id(wr_y), W = id(wr_w);
+              if (W < 60) return;
+              int g = id(f_wgrp)(), t = id(f_tcls)();
+              bool clearish = (g == 0 || g == 1 || g == 7);
+              int sx = X + W - 24, sy = Y + 17;
+              if (clearish) {
+                if (t == 2) { id(f_circ)(sx, sy, 14, id(f_rgb)(255, 214, 90)); id(f_cmd)("cir " + std::to_string(id(f_sx)(sx)) + "," + std::to_string(sy) + ",17," + std::to_string(id(f_rgb)(255, 232, 150))); }
+                else if (t == 1) id(f_circ)(sx, sy + 3, 13, id(f_rgb)(255, 150, 70));
+                else { id(f_circ)(sx, sy, 12, id(f_rgb)(235, 232, 210)); id(f_circ)(sx + 6, sy - 4, 10, id(f_sky)(0)); }
+              }
+              int n = (g == 1 || g == 7) ? 2 : (clearish ? 0 : (W >= 170 ? 4 : 3));
+              int cc;
+              if (g == 1 || g == 7) cc = t == 2 ? id(f_rgb)(235, 238, 243) : (t == 1 ? id(f_rgb)(180, 170, 180) : id(f_rgb)(60, 66, 84));
+              else if (g == 2 || g == 3) cc = t == 2 ? id(f_rgb)(175, 180, 190) : (t == 1 ? id(f_rgb)(130, 132, 142) : id(f_rgb)(52, 56, 70));
+              else if (g == 5) cc = id(f_rgb)(80, 80, 98);
+              else cc = t == 2 ? id(f_rgb)(120, 126, 138) : id(f_rgb)(62, 66, 80);
+              int span = (n == 2) ? (W - 60) : (W - 50);
+              for (int k = 0; k < n; k++) {
+                int cx = X + 8 + ((n == 2) ? k * span / 2 : k * span / (n - 1));
+                int cy = Y + 14 + (k % 2) * 2;
+                id(f_circ)(cx, cy + 6, 10, cc);
+                id(f_circ)(cx + 14, cy, 13, cc);
+                id(f_circ)(cx + 28, cy + 6, 10, cc);
+                id(f_fill)(cx, cy + 6, 28, 10, cc);
+              }
+              if (g == 5) {
+                int cy = id(f_rgb)(255, 230, 80);
+                for (int bx : {X + W / 3, X + 2 * W / 3}) {
+                  id(f_line)(bx, Y + 22, bx - 4, Y + 27, cy); id(f_line)(bx - 4, Y + 27, bx + 1, Y + 27, cy); id(f_line)(bx + 1, Y + 27, bx - 4, Y + 33, cy);
+                }
+              }
+            };
+            id(f_wname) = [](const std::string &c) -> std::string {
+              static const char *k[] = {"sunny", "clear-night", "partlycloudy", "cloudy", "fog", "rainy", "pouring", "hail", "snowy", "snowy-rainy", "lightning", "lightning-rainy", "windy", "windy-variant", "exceptional"};
+              static const char *v[] = {"Słonecznie", "Pogodnie", "Małe zachmurzenie", "Pochmurno", "Mgła", "Deszcz", "Ulewa", "Grad", "Śnieg", "Śnieg z deszczem", "Burza", "Burza z deszczem", "Wietrznie", "Wietrznie", "Uwaga - pogoda"};
+              for (int i = 0; i < 15; i++) if (c == k[i]) return v[i];
+              return c;
+            };
+            // n-th field of "a|b|c"
+            id(f_fld) = [](const std::string &s, int n) -> std::string {
+              size_t st = 0;
+              for (int k = 0; k < n; k++) {
+                size_t p = s.find('|', st);
+                if (p == std::string::npos) return "";
+                st = p + 1;
+              }
+              size_t e = s.find('|', st);
+              return s.substr(st, e == std::string::npos ? std::string::npos : e - st);
+            };
+            // small weather icon centered at cx,cy (about 24 x 20 px)
+            id(f_micon) = [](int cx, int cy, const std::string &c, int bg) {
+              int g = id(f_grp)(c);
+              int sun = id(f_rgb)(255, 210, 80), cl = id(f_rgb)(190, 195, 205), dk = id(f_rgb)(120, 126, 140);
+              if (c == "clear-night") { id(f_circ)(cx, cy, 7, id(f_rgb)(235, 232, 210)); id(f_circ)(cx + 4, cy - 3, 6, bg); return; }
+              if (g == 0) { id(f_circ)(cx, cy, 7, sun); return; }
+              if (g == 1 || g == 7) id(f_circ)(cx + 5, cy - 4, 6, sun);
+              int cc = (g == 4 || g == 5 || g == 6) ? dk : cl;
+              id(f_circ)(cx - 6, cy + 2, 5, cc);
+              id(f_circ)(cx, cy - 2, 7, cc);
+              id(f_circ)(cx + 6, cy + 2, 5, cc);
+              id(f_fill)(cx - 6, cy + 2, 12, 5, cc);
+              if (g == 4) { int b = id(f_rgb)(120, 170, 255); id(f_line)(cx - 4, cy + 9, cx - 6, cy + 13, b); id(f_line)(cx + 3, cy + 9, cx + 1, cy + 13, b); }
+              if (g == 6) { int w = id(f_rgb)(240, 245, 255); id(f_circ)(cx - 4, cy + 11, 1, w); id(f_circ)(cx + 3, cy + 11, 1, w); }
+              if (g == 5) { int y = id(f_rgb)(255, 220, 60); id(f_line)(cx, cy + 7, cx - 3, cy + 11, y); id(f_line)(cx - 3, cy + 11, cx + 1, cy + 11, y); id(f_line)(cx + 1, cy + 11, cx - 2, cy + 15, y); }
+              if (g == 3) { int f = id(f_rgb)(200, 205, 210); id(f_line)(cx - 8, cy + 10, cx + 8, cy + 10, f); id(f_line)(cx - 6, cy + 13, cx + 6, cy + 13, f); }
+            };
+            // 0..1 -> green, yellow, red (smooth)
+            id(f_heat) = [](float p) -> int {
+              p = p < 0 ? 0 : (p > 1 ? 1 : p);
+              if (p < 0.5f) {
+                float q = p / 0.5f;
+                return id(f_rgb)((int) (60 + 180 * q), 200, (int) (90 - 50 * q));
+              }
+              float q = (p - 0.5f) / 0.5f;
+              return id(f_rgb)((int) (240 - 5 * q), (int) (200 - 140 * q), (int) (40 + 10 * q));
+            };
+            // climate tile main value
+            id(f_kval) = []() -> std::string {
+              if (id(k_id).empty()) return "--";
+              if (id(k_st) == "off") return "Wył.";
+              char *end = nullptr;
+              float t = strtof(id(k_tgt).c_str(), &end);
+              if (id(k_tgt).empty() || end == id(k_tgt).c_str()) return "--";
+              char b[16];
+              snprintf(b, sizeof(b), id(k_step) < 0.99f ? "%.1f" : "%.0f", t);
+              return std::string(b) + "°";
+            };
+            // label and value text for V / B tiles
+            id(f_lval) = [](int i, std::string &lbl, std::string &val, float &frac) {
+              const std::string &s = id(lt_s)[i];
+              std::string unit = (id(lt_t)[i] == "V" && !id(lt_o2)[i].empty()) ? id(lt_o2)[i] : id(lt_x)[i];
+              char *end = nullptr;
+              float v = strtof(s.c_str(), &end);
+              bool num = !s.empty() && end != s.c_str() && *end == 0;
+              frac = 0;
+              if (!num) {
+                if (s.empty() || s == "unavailable" || s == "unknown") val = "--";
+                else if (s == "on") val = "Wł.";
+                else if (s == "off") val = "Wył.";
+                else val = id(f_lbl)(0, s);
+              } else {
+                if (id(lt_t)[i] == "B") {
+                  float mn = id(lt_o1)[i].empty() ? 0.0f : strtof(id(lt_o1)[i].c_str(), nullptr);
+                  float mx = id(lt_o2)[i].empty() ? 100.0f : strtof(id(lt_o2)[i].c_str(), nullptr);
+                  if (mx > mn) frac = (v - mn) / (mx - mn);
+                  frac = frac < 0 ? 0 : (frac > 1 ? 1 : frac);
+                }
+                int dec = -1;
+                if (id(lt_t)[i] == "V" && !id(lt_o1)[i].empty()) dec = atoi(id(lt_o1)[i].c_str());
+                if (dec < 0 && unit == "W" && fabsf(v) >= 1000.0f) { v /= 1000.0f; unit = "kW"; dec = fabsf(v) < 10.0f ? 2 : 1; }
+                if (dec < 0) dec = (s.find('.') == std::string::npos) ? 0 : (fabsf(v) < 100.0f ? 1 : 0);
+                char b[24];
+                snprintf(b, sizeof(b), "%.*f", dec, v);
+                val = b;
+              }
+              lbl = id(lt_l)[i] + (unit.empty() ? std::string("") : " " + unit);
+            };
+            // change-detection key of a tile
+            id(f_lkey) = [](int i) -> std::string {
+              const std::string &t = id(lt_t)[i];
+              if (t == "V" && id(lt_o2)[i] == "g13") {
+                auto now = id(ha_time).now();
+                int slot = now.is_valid() ? now.hour * 4 + now.minute / 15 : -1;
+                return id(lt_s)[i] + "|" + std::to_string(slot) + "|" + std::to_string(id(f_tbg)());
+              }
+              if (t == "V" && id(lt_o2)[i] == "dom")
+                return id(lt_s)[i] + "|" + id(k_id) + "|" + id(k_st) + "|" + id(f_kval)() + "|" + id(k_fan) + "|" + std::to_string(id(f_tbg)());
+              if (t == "V" || t == "B") { std::string l, v; float f; id(f_lval)(i, l, v, f); return l + "|" + v + "|" + std::to_string((int) (f * 100)) + "|" + std::to_string(id(f_acc)(i)); }
+              if (t == "T") return id(lt_s)[i];
+              if (t == "K") return id(f_kval)() + "|" + id(k_st) + "|" + id(k_fan);
+              if (t == "C") { auto now = id(ha_time).now(); return now.is_valid() ? now.strftime("%H:%M") : std::string("--:--"); }
+              return "";
+            };
+            id(f_clock) = [](bool bg) {
+              if (id(wz_clock) < 0) return;
+              auto now = id(ha_time).now();
+              std::string t = now.is_valid() ? now.strftime("%H:%M") : std::string("--:--");
+              id(o_shown)[5] = t;
+              if (bg) id(f_bg)(id(wr_x), id(wz_clock), id(wr_w), 72);
+              id(f_strt)(id(wr_x), id(wz_clock), id(wr_w), 72, id(f_fit)(t, id(wr_w) - 8, 72, 4), 65535, 1, t);
+            };
+            id(f_wtval) = []() -> std::string {
+              const std::string &s = id(o_raw)[0];
+              char *end = nullptr;
+              float v = strtof(s.c_str(), &end);
+              if (s.empty() || end == s.c_str()) return "--";
+              char b[16];
+              snprintf(b, sizeof(b), "%.1f", v);
+              if (strlen(b) > 4) snprintf(b, sizeof(b), "%.0f", v);
+              return std::string(b) + "°";
+            };
+            id(f_wtemp) = [](bool bg) {
+              if (id(wz_temp) < 0) return;
+              std::string val = id(f_wtval)();
+              id(o_shown)[0] = val;
+              int th = id(wz_temph);
+              if (bg) id(f_bg)(id(wr_x), id(wz_temp), id(wr_w), th);
+              id(f_strt)(id(wr_x), id(wz_temp), id(wr_w), th, id(f_fit)(val, id(wr_w) - 8, th, 4), 65535, 1, val);
+            };
+            // info: line 1 (precipitation), line 2 split at ", " into two lines
+            id(f_winfo) = [](bool bg) {
+              if (id(wz_info) < 0) return;
+              int X = id(wr_x), W = id(wr_w), y = id(wz_info);
+              id(o_shown)[6] = id(o_wi1) + "|" + id(o_wi2);
+              if (bg) id(f_bg)(X, y, W, id(wr_y) + id(wr_h) - y);
+              const std::string &a = id(o_wi1);
+              id(f_strt)(X, y + 2, W, 28, id(f_fit)(a, W - 8, 28, 1), 61278, 1, a);
+              std::string l1 = id(o_wi2), l2 = "";
+              size_t p = l1.find(", ");
+              if (p != std::string::npos) { l2 = l1.substr(p + 2); l1 = l1.substr(0, p); }
+              if (id(wz_infon) < 3) return;
+              id(f_strt)(X, y + 34, W, 24, 0, 61278, 1, l1);
+              id(f_strt)(X, y + 58, W, 24, 0, 61278, 1, l2);
+            };
+            id(f_wtile) = []() {
+              if (id(wr_w) <= 0) return;
+              id(f_bg)(id(wr_x), id(wr_y), id(wr_w), id(wr_h));
+              id(f_decor)();
+              id(f_clock)(false);
+              if (id(wz_cond) >= 0) {
+                std::string wn = id(f_wname)(id(o_wx));
+                id(f_strt)(id(wr_x), id(wz_cond), id(wr_w), 30, id(f_fit)(wn, id(wr_w) - 8, 30, 1), 61278, 1, wn);
+              }
+              id(f_wtemp)(false);
+              id(f_winfo)(false);
+            };
+            // ---------------- tile styling ----------------
+            id(f_mix) = [](int c1, int c2, float t) -> int {
+              int r1 = ((c1 >> 11) & 31) * 255 / 31, g1 = ((c1 >> 5) & 63) * 255 / 63, b1 = (c1 & 31) * 255 / 31;
+              int r2 = ((c2 >> 11) & 31) * 255 / 31, g2 = ((c2 >> 5) & 63) * 255 / 63, b2 = (c2 & 31) * 255 / 31;
+              return id(f_rgb)((int) (r1 + (r2 - r1) * t), (int) (g1 + (g2 - g1) * t), (int) (b1 + (b2 - b1) * t));
+            };
+            // screen and tile backgrounds tinted with the current sky (weather + time of day)
+            id(f_sbg) = []() -> int { return id(f_mix)(id(f_rgb)(8, 9, 14), id(f_sky)(0), 0.22f); };
+            id(f_tbg) = []() -> int { return id(f_mix)(id(f_rgb)(34, 38, 50), id(f_sky)(3), 0.28f); };
+            // accent colour of a tile (top bar + frame) from its state
+            id(f_acc) = [](int i) -> int {
+              const std::string &t = id(lt_t)[i];
+              int neutral = id(f_mix)(id(f_rgb)(120, 150, 200), id(f_sky)(8), 0.35f);
+              if (t == "K") return (id(k_st) == "off" || id(k_id).empty()) ? id(f_rgb)(110, 116, 130) : id(f_hvc)(id(k_st));
+              if (t == "T") {
+                const std::string &s = id(lt_s)[i];
+                bool on = (s == "on" || s == "open" || s == "playing" || s == "unlocked" || s == "heat" || s == "cool");
+                return on ? (id(lt_e)[i].rfind("light.", 0) == 0 ? 64900 : 11828) : id(f_rgb)(110, 116, 130);
+              }
+              const std::string &s = id(lt_s)[i];
+              char *end = nullptr;
+              float v = strtof(s.c_str(), &end);
+              bool num = !s.empty() && end != s.c_str();
+              if (t == "B") {
+                if (!num) return neutral;
+                std::string l, val; float f;
+                id(f_lval)(i, l, val, f);
+                return id(f_heat)(f);
+              }
+              if (t == "V" && num) {
+                std::string u = id(lt_o2)[i].empty() ? id(lt_x)[i] : id(lt_o2)[i];
+                if (u.find("°") != std::string::npos) {
+                  if (v < 5) return id(f_rgb)(80, 150, 255);
+                  if (v < 18) return id(f_rgb)(80, 200, 235);
+                  if (v < 24) return id(f_rgb)(70, 205, 120);
+                  if (v < 28) return id(f_rgb)(255, 176, 32);
+                  return id(f_rgb)(255, 90, 60);
+                }
+                if (u == "%") return id(f_rgb)(90, 190, 255);
+              }
+              return neutral;
+            };
+            // 1 px rectangle outline (scaled like the other primitives)
+            id(f_drect) = [](int x, int y, int w, int h, int c) {
+              char b[48];
+              snprintf(b, sizeof(b), "draw %d,%d,%d,%d,%d", id(f_sx)(x), y, id(f_sx)(x + w) - 1, y + h - 1, c);
+              id(f_cmd)(b);
+            };
+            // tile body: tinted fill, 4 px accent bar on top, 2 px accent frame
+            id(f_tbody) = [](int x, int y, int w, int h, int bg, int acc) {
+              id(f_fill)(x, y, w, h, bg);
+              int dim = id(f_mix)(acc, bg, 0.45f);
+              id(f_drect)(x, y, w, h, dim);
+              id(f_drect)(x + 1, y + 1, w - 2, h - 2, dim);
+              id(f_fill)(x, y, w, 4, acc);
+            };
+            // label: 24 px when there is room; too long -> shortened with '.', never tiny
+            id(f_label) = [](int x, int y, int w, int h, int bg, const std::string &t) {
+              int lf = h >= 28 ? 1 : 0;
+              std::string s = t;
+              if (lf == 1) {
+                int n = id(f_len)(s);
+                while (n > 3 && id(f_fit)(s, w, 28, 1) < 1) {
+                  size_t cut = s.size();
+                  int k = 0;
+                  for (size_t j = 0; j < s.size(); j++) if (((uint8_t) s[j] & 0xC0) != 0x80) { if (k == n - 2) { cut = j; break; } k++; }
+                  s = s.substr(0, cut);
+                  while (!s.empty() && (s.back() == ' ' || s.back() == '.')) s.pop_back();
+                  s += ".";
+                  n = id(f_len)(s);
+                }
+              }
+              id(f_str)(x, y, w, h, lf, id(f_rgb)(222, 228, 240), bg, 0, s);
+            };
+            // ---------------- G13 tariff tile ----------------
+            // layout tile "V" with opt2 == "g13" (editor type "Prad G13")
+            // state (sensor.nspanel_g13_data): "Z;next;pct;p;a;b;segs;month"
+            //   Z zone P/A/B, next "16:00" or "pn 07:00", pct savings % vs G11,
+            //   p/a/b kWh share % (cheap/medium/expensive), segs today "P0A7P13B16P21",
+            //   month savings PLN this month
+            // look: sky background like the weather tile, thick frame in the zone colour,
+            // big values for elderly users, 24 h zone dial with a "now" needle
+            id(f_g13) = [](int i, int x, int y, int w, int h) {
+              const std::string &s = id(lt_s)[i];
+              auto fld = [&s](int n) -> std::string {
+                size_t p = 0;
+                for (int k = 0; k < n; k++) {
+                  p = s.find(';', p);
+                  if (p == std::string::npos) return "";
+                  p++;
+                }
+                size_t e = s.find(';', p);
+                return s.substr(p, e == std::string::npos ? std::string::npos : e - p);
+              };
+              int cP = id(f_rgb)(67, 190, 71), cA = id(f_rgb)(255, 150, 0), cB = id(f_rgb)(240, 50, 45);
+              int cS = id(f_rgb)(38, 190, 175), cG = id(f_rgb)(100, 115, 210), cN = id(f_rgb)(120, 126, 140);
+              std::string z = fld(0);
+              bool ok = (z == "P" || z == "A" || z == "B");
+              int zc = z == "B" ? cB : (z == "A" ? cA : (z == "P" ? cP : cN));
+              // background + thick zone frame (visible from far away)
+              id(f_skyfill)(x, y, w, h);
+              int fr = w >= 120 && h >= 120 ? 7 : 5;
+              id(f_fill)(x, y, w, fr, zc);
+              id(f_fill)(x, y + h - fr, w, fr, zc);
+              id(f_fill)(x, y, fr, h, zc);
+              id(f_fill)(x + w - fr, y, fr, h, zc);
+              int X = x + fr + 4, Y = y + fr + 2, W = w - 2 * fr - 8, H = h - 2 * fr - 4;
+              // header: zone name + end of the zone
+              std::string zn = z == "B" ? "Drogi" : (z == "A" ? "Średni" : (z == "P" ? "Tani" : "G13"));
+              std::string nx = ok ? fld(1) : "";
+              int hh = H >= 140 ? 38 : 30, hh2 = 0;
+              std::string head = nx.empty() ? zn : zn + " do " + nx, sub = "";
+              if (id(f_fit)(head, W, hh, 2) < 2 && !nx.empty()) {
+                if (H >= 150) { head = zn; sub = "do " + nx; hh2 = 26; }
+                else if (id(f_fit)(head, W, hh, 2) < 1) head = zn;
+              }
+              id(f_strt)(X, Y, W, hh, id(f_fit)(head, W, hh, 2), zc, 1, head);
+              if (hh2) id(f_strt)(X, Y + hh - 4, W, hh2, id(f_fit)(sub, W, hh2, 1), 65535, 1, sub);
+              // today's zones (letter + start hour)
+              std::string sg = ok ? fld(6) : "";
+              std::vector<std::pair<char, int>> v;
+              size_t p = 0;
+              while (p < sg.size()) {
+                char c = sg[p++];
+                int n = 0;
+                bool dig = false;
+                while (p < sg.size() && sg[p] >= '0' && sg[p] <= '9') { n = n * 10 + (sg[p] - '0'); p++; dig = true; }
+                if (dig && (c == 'P' || c == 'A' || c == 'B') && n >= 0 && n < 24) v.push_back({c, n});
+              }
+              auto zcol = [&](char c) -> int { return c == 'B' ? cB : (c == 'A' ? cA : cP); };
+              // middle: three rings - 24 h zone dial (outer) with the "now" needle,
+              // saved vs paid, kWh per zone - and the legend
+              int top = Y + hh + (hh2 ? hh2 - 4 : 0), bot = Y + H;
+              float pct = ok ? strtof(fld(2).c_str(), nullptr) : 0.0f;
+              float sP = ok ? strtof(fld(3).c_str(), nullptr) : 0.0f;
+              float sA = ok ? strtof(fld(4).c_str(), nullptr) : 0.0f;
+              float sB = ok ? strtof(fld(5).c_str(), nullptr) : 0.0f;
+              float tot = sP + sA + sB;
+              std::string mon = ok ? fld(7) : "";
+              int mh = bot - top;
+              int R = std::min(mh, W) / 2;
+              bool side = W - 2 * R >= 110;
+              if (!side && W >= 2 * 40 + 110) { R = (W - 110) / 2; side = true; }
+              bool below = !side && mh - 2 * std::min(R, 40) >= 28 && tot > 0;
+              if (below) R = std::min(mh - 30, W) / 2;
+              if (R > 90) R = 90;
+              if (R < 20) return;
+              int grp = 2 * R + (below ? 30 : 0);
+              int cx = side ? X + R : X + W / 2;
+              int cy = top + R + std::max(0, (mh - grp) / 2);
+              int t3 = R >= 40 ? std::max(15, R * 22 / 100) : std::max(8, R * 22 / 100);  // room for hour numbers
+              int t2 = std::max(5, R * 11 / 100), t1 = std::max(5, R * 11 / 100);
+              int r3o = R, r3i = R - t3;                  // 24 h dial
+              int r2o = r3i - 3, r2i = r2o - t2;          // saved vs paid
+              int r1o = r2i - 2, r1i = r1o - t1;          // kWh per zone
+              float kx = 480.0f / id(p_uiw);  // radial lines are drawn in logical x, circles in physical
+              auto rad = [&](float a, int r0, int r1, int c) {
+                float sn = sinf(a * 6.2832f), cs = cosf(a * 6.2832f);
+                id(f_line)(cx + (int) lroundf(r0 * sn * kx), cy - (int) lroundf(r0 * cs),
+                           cx + (int) lroundf(r1 * sn * kx), cy - (int) lroundf(r1 * cs), c);
+              };
+              auto arc = [&](int r0, int r1, float f0, float f1, int c) {
+                if (f1 <= f0) return;
+                int n = (int) ceilf((f1 - f0) * 6.2832f * r1 / 1.1f);
+                if (n > 260) n = 260;
+                for (int k = 0; k <= n; k++) rad(f0 + (f1 - f0) * k / std::max(1, n), r0, r1, c);
+              };
+              // disk filled with the sky rows (cuts a ring without a flat patch)
+              auto skydisk = [&](int r) {
+                for (int dy = -r; dy < r; dy += 2) {
+                  float yy = dy + 1.0f;
+                  float hf = sqrtf(std::max(0.0f, (float) r * r - yy * yy));
+                  int hw = (int) (hf * kx + 0.5f);
+                  if (hw > 0) id(f_fill)(cx - hw, cy + dy, 2 * hw, 2, id(f_skyy)(cy + dy));
+                }
+              };
+              int SK = id(f_skyy)(cy);
+              auto sep = [&](int r0, int r1, float f) { for (int d = -1; d <= 1; d++) rad(f + d * 0.1f / r1, r0, r1 + 1, SK); };
+              int ring0 = id(f_mix)(SK, 0, 0.45f);
+              int tick = id(f_rgb)(20, 22, 30);
+              // ring 3: 24 h dial, 0:00 at the top, clockwise (6 right, 12 bottom, 18 left)
+              if (v.empty()) {
+                id(f_circ)(cx, cy, r3o, ring0);
+              } else {
+                int hrs[3] = {0, 0, 0};
+                for (size_t k = 0; k < v.size(); k++) {
+                  int a = v[k].second, b = k + 1 < v.size() ? v[k + 1].second : 24;
+                  hrs[v[k].first == 'P' ? 0 : (v[k].first == 'A' ? 1 : 2)] += b - a;
+                }
+                char base = hrs[0] >= hrs[1] && hrs[0] >= hrs[2] ? 'P' : (hrs[1] >= hrs[2] ? 'A' : 'B');
+                id(f_circ)(cx, cy, r3o, zcol(base));
+                for (size_t k = 0; k < v.size(); k++) {
+                  if (v[k].first == base) continue;
+                  int a = v[k].second, b = k + 1 < v.size() ? v[k + 1].second : 24;
+                  arc(r3i, r3o - 1, a / 24.0f, b / 24.0f, zcol(v[k].first));
+                }
+              }
+              skydisk(r3i);
+              // hour ticks on the dial, long ones at 0 / 6 / 12 / 18
+              for (int hr = 0; hr < 24; hr++) {
+                bool major = hr % 6 == 0;
+                float a = hr / 24.0f;
+                if (major) { rad(a - 0.6f / (r3o * 6.2832f), r3i, r3o - 1, tick); rad(a, r3i, r3o - 1, tick); rad(a + 0.6f / (r3o * 6.2832f), r3i, r3o - 1, tick); }
+                else rad(a, r3o - t3 * 45 / 100, r3o - 1, tick);
+              }
+              // ring 2: saved (from the top) vs paid
+              float f1 = pct / 100.0f;
+              f1 = f1 < 0 ? 0 : (f1 > 1 ? 1 : f1);
+              id(f_circ)(cx, cy, r2o, ok ? cG : ring0);
+              if (ok && f1 > 0) { arc(r2i, r2o - 1, 0.0f, f1, cS); sep(r2i, r2o, 0.0f); sep(r2i, r2o, f1); }
+              skydisk(r2i);
+              // ring 1: kWh per zone
+              id(f_circ)(cx, cy, r1o, tot > 0 ? cP : ring0);
+              if (tot > 0) {
+                float a0 = sP / tot, a1 = (sP + sA) / tot;
+                arc(r1i, r1o - 1, a0, a1, cA);
+                arc(r1i, r1o - 1, a1, 1.0f, cB);
+                sep(r1i, r1o, 0.0f); sep(r1i, r1o, a0); sep(r1i, r1o, a1);
+              }
+              skydisk(r1i);
+              // hour numbers on the dial (big enough tiles only)
+              if (t3 >= 15) {
+                const char *lb[4] = {"0", "6", "12", "18"};
+                int rm = (r3o + r3i) / 2;
+                for (int q = 0; q < 4; q++) {
+                  float a = q * 0.25f;
+                  int lx = cx + (int) lroundf(rm * sinf(a * 6.2832f) * kx), ly = cy - (int) lroundf(rm * cosf(a * 6.2832f));
+                  int bw2 = q >= 2 ? 26 : 18;
+                  int ox = q == 1 ? -bw2 - 3 : (q == 3 ? 4 : -bw2 / 2);  // keep the number beside the long tick
+                  id(f_strt)(lx + ox, ly - 9, bw2, 18, 0, 65535, 1, lb[q]);
+                }
+              }
+              // "now" needle across the dial
+              auto now = id(ha_time).now();
+              if (now.is_valid() && !v.empty()) {
+                float a = (now.hour * 60 + now.minute) / 1440.0f;
+                float d = 1.0f / (r3o * 6.2832f);
+                for (int k = -3; k <= 3; k++) rad(a + k * d, r3i - 2, r3o + 4, (k == -3 || k == 3) ? tick : 65535);
+              }
+              // centre: savings percent, as big as the hole allows
+              int hole = r1i - 1;
+              char b[16];
+              if (ok) snprintf(b, sizeof(b), "%.0f%%", pct); else snprintf(b, sizeof(b), "--");
+              std::string ct = b;
+              int chh = std::min(2 * hole - 4, 60);
+              bool centre = hole >= 14 && id(f_fit)(ct, 2 * hole - 6, chh, 3) >= 1;
+              if (centre) id(f_strt)(cx - hole, cy - chh / 2, 2 * hole, chh, id(f_fit)(ct, 2 * hole - 6, chh, 3), 65535, 1, ct);
+              // legend: one font size for all rows (the largest that fits every row)
+              char l1[24], l2[24], l3[24];
+              snprintf(l1, sizeof(l1), "Tani %.0f%%", tot > 0 ? sP * 100 / tot : 0.0f);
+              snprintf(l2, sizeof(l2), "Średni %.0f%%", tot > 0 ? sA * 100 / tot : 0.0f);
+              snprintf(l3, sizeof(l3), "Drogi %.0f%%", tot > 0 ? sB * 100 / tot : 0.0f);
+              // 4th row: savings % when the centre is too small, else this month in PLN
+              std::string m4 = !centre && ok ? std::string("Taniej o ") + ct : (mon.empty() ? "" : "+" + mon + " zł/mies.");
+              if (side) {
+                int lx = X + 2 * R + 10, lw = X + W - lx;
+                int n = (m4.empty() || 2 * R < 4 * 26) ? 3 : 4;
+                auto legf = [&](int rows) {
+                  int rh = std::min(40, 2 * R / rows), f = 2;
+                  f = std::min(f, id(f_fit)(l1, lw, rh, 2));
+                  f = std::min(f, id(f_fit)(l2, lw, rh, 2));
+                  f = std::min(f, id(f_fit)(l3, lw, rh, 2));
+                  if (rows == 4) f = std::min(f, id(f_fit)(m4, lw, rh, 2));
+                  return f;
+                };
+                // the 4th row may not shrink the others (unless it carries the savings %)
+                if (n == 4 && centre && legf(4) < legf(3)) n = 3;
+                int rowh = std::min(40, 2 * R / n);
+                int lf = legf(n);
+                int ly = cy - n * rowh / 2;
+                id(f_strt)(lx, ly, lw, rowh, lf, cP, 0, l1);
+                id(f_strt)(lx, ly + rowh, lw, rowh, lf, cA, 0, l2);
+                id(f_strt)(lx, ly + 2 * rowh, lw, rowh, lf, cB, 0, l3);
+                if (n == 4) id(f_strt)(lx, ly + 3 * rowh, lw, rowh, lf, cS, 0, m4);
+              } else if (below) {
+                int ly = cy + R + 2, cwid = W / 3;
+                char a1[8], a2[8], a3[8];
+                snprintf(a1, sizeof(a1), "%.0f%%", sP * 100 / tot);
+                snprintf(a2, sizeof(a2), "%.0f%%", sA * 100 / tot);
+                snprintf(a3, sizeof(a3), "%.0f%%", sB * 100 / tot);
+                int lf = std::min(id(f_fit)(std::string(a2), cwid - 4, 28, 2), id(f_fit)(std::string(a1), cwid - 4, 28, 2));
+                id(f_strt)(X, ly, cwid, 28, lf, cP, 1, a1);
+                id(f_strt)(X + cwid, ly, cwid, 28, lf, cA, 1, a2);
+                id(f_strt)(X + 2 * cwid, ly, W - 2 * cwid, 28, lf, cB, 1, a3);
+              }
+            };
+            // ---------------- house tile ----------------
+            // layout tile "V" with opt2 == "dom" (editor type "Dom")
+            // state (sensor.panel_dom_dane): "t_in;t_roof;power_W;power_max_W"
+            // climate values come from the klima action (k_* globals)
+            // look: sky background, solid dark house with a thick outline, two unified
+            // value sizes (indoor + climate big, roof + power second) for elderly users
+            id(f_dtile) = [](int i, int x, int y, int w, int h) {
+              const std::string &s = id(lt_s)[i];
+              auto fld = [&s](int n) -> std::string {
+                size_t p = 0;
+                for (int k = 0; k < n; k++) {
+                  p = s.find(';', p);
+                  if (p == std::string::npos) return "";
+                  p++;
+                }
+                size_t e = s.find(';', p);
+                return s.substr(p, e == std::string::npos ? std::string::npos : e - p);
+              };
+              auto num = [](const std::string &v, float &out) -> bool {
+                char *end = nullptr;
+                out = strtof(v.c_str(), &end);
+                return !v.empty() && end != v.c_str();
+              };
+              // one decimal only when the source has one (and it fits in 4 chars)
+              auto tfmt = [](float v, const std::string &src) -> std::string {
+                char b[16];
+                snprintf(b, sizeof(b), src.find('.') != std::string::npos ? "%.1f" : "%.0f", v);
+                if (strlen(b) > 4) snprintf(b, sizeof(b), "%.0f", v);
+                return std::string(b) + "°";
+              };
+              // temperature colour (bright, readable on the sky)
+              auto tcol = [](float v) -> int {
+                if (v < 5) return id(f_rgb)(90, 160, 255);
+                if (v < 18) return id(f_rgb)(80, 210, 245);
+                if (v < 24) return id(f_rgb)(80, 220, 110);
+                if (v < 28) return id(f_rgb)(255, 180, 30);
+                return id(f_rgb)(255, 80, 50);
+              };
+              float tin = 0, troof = 0, pw = 0, pmax = 2700, tmp = 0;
+              bool hin = num(fld(0), tin), hroof = num(fld(1), troof), hpw = num(fld(2), pw);
+              if (num(fld(3), tmp) && tmp > 0) pmax = tmp;
+              bool koff = id(k_id).empty() || id(k_st) == "off";
+              int kc = koff ? id(f_rgb)(130, 136, 150) : id(f_hvc)(id(k_st));
+              int DIM = id(f_rgb)(170, 176, 190);
+              // background + 6 px climate bar
+              id(f_skyfill)(x, y, w, h);
+              id(f_fill)(x, y, w, 6, kc);
+              int pad = w >= 120 ? 8 : 5;
+              // ground = power bar along the whole tile bottom
+              int gh = h >= 120 ? 10 : 8, gy = y + h - gh - 5, gx = x + pad, gw = w - 2 * pad;
+              float frac = hpw ? pw / pmax : 0;
+              frac = frac < 0 ? 0 : (frac > 1 ? 1 : frac);
+              id(f_fill)(gx, gy, gw, gh, id(f_mix)(id(f_skyy)(gy), 0, 0.6f));
+              int fw = (int) (gw * frac + 0.5f);
+              for (int sx = 0; sx < fw; sx += 6) {
+                int sw = std::min(6, fw - sx);
+                id(f_fill)(gx + sx, gy, sw, gh, id(f_heat)((sx + sw * 0.5f) / gw));
+              }
+              bool wide = w >= h * 1.3f;
+              int top = y + 10, bottom = gy - 3;
+              int hw, hh, hx, hy, ix, iy, iw, ih;
+              if (wide) {
+                hh = bottom - top;
+                hw = std::min((int) (hh * 1.35f), (w - 2 * pad) * 60 / 100);
+                hx = x + pad; hy = top;
+                ix = hx + hw + 8; iy = top; iw = x + w - pad - ix; ih = hh;
+              } else {
+                hw = w - 2 * pad;
+                hh = std::min((int) (hw * 0.95f), (bottom - top) * 58 / 100);
+                hx = x + pad; hy = top;
+                ix = x + pad; iy = hy + hh + 4; iw = w - 2 * pad; ih = bottom - iy;
+              }
+              int rc = hroof ? tcol(troof) : DIM, wc = hin ? tcol(tin) : DIM;
+              int lw = hw >= 110 ? 5 : 4;
+              int lwi = 4;                                              // wall outline                               // outline thickness
+              int hb = hy + hh, rh = std::max(20, hh * 42 / 100);
+              int ax = hx + hw / 2, ay = hy, ey = hy + rh;
+              int wl = hx + hw * 6 / 100, wr = hx + hw - hw * 6 / 100;
+              int dark = id(f_mix)(id(f_skyy)((hy + hb) / 2), 0, 0.5f);
+              // solid house: roof triangle + walls in a dark tone, then thick outline
+              for (int ry = ay + 2; ry < ey; ry += 2) {
+                int half = (int) ((float) (ry - ay) / (ey - ay) * (hw / 2.0f));
+                if (half > 0) id(f_fill)(ax - half, ry, 2 * half, 2, dark);
+              }
+              id(f_fill)(wl, ey, wr - wl, hb - ey, dark);
+              int cxp = hx + hw * 70 / 100, chw = std::max(8, hw / 11);
+              int roofy = ay + (int) ((float) (cxp - ax) / (hw / 2.0f) * (ey - ay));
+              id(f_fill)(cxp, roofy - rh * 45 / 100, chw, rh * 45 / 100 + 3, rc);
+              for (int k = 0; k < lw; k++) {
+                id(f_line)(hx, ey - k, ax, ay + lw - 1 - k, rc);
+                id(f_line)(hx + hw - 1, ey - k, ax, ay + lw - 1 - k, rc);
+              }
+              id(f_fill)(wl, ey, lwi, hb - ey, wc);
+              id(f_fill)(wr - lwi, ey, lwi, hb - ey, wc);
+              id(f_fill)(wl, hb - lwi, wr - wl, lwi, wc);
+              // text boxes
+              std::string vroof = hroof ? tfmt(troof, fld(1)) : std::string("--");
+              std::string vin = hin ? tfmt(tin, fld(0)) : std::string("--");
+              int rbw = hw * 60 / 100, rbh = rh * 58 / 100, rby = ey - rbh - 1;
+              int ibx = wl + lwi + 1, ibw = wr - wl - 2 * lwi - 2, iby = ey + 2, ibh = hb - lwi - 2 - iby;
+              int lab = ibh >= 90 ? 26 : 0;                            // "W domu" label when there is room
+              std::string kv = koff ? (id(k_id).empty() ? std::string("--") : std::string("Wył.")) : id(f_kval)();
+              char pb[24];
+              if (!hpw) snprintf(pb, sizeof(pb), "--");
+              else if (fabsf(pw) >= 1000) snprintf(pb, sizeof(pb), "%.1f kW", pw / 1000.0f);
+              else snprintf(pb, sizeof(pb), "%.0f W", pw);
+              std::string pv = pb;
+              for (auto &c : pv) if (c == '.') c = ',';
+              // info column geometry
+              int uw = std::min(44, iw / 3), uh = std::max(12, uw * 4 / 10);
+              int krow = ih * 44 / 100, mrow = ih >= 90 ? 28 : 0, prow = ih - krow - mrow;
+              // the unit icon only when the target still fits at the biggest size
+              bool icon = id(f_fit)(kv, iw - uw - 6, krow, 3) >= 3 || id(f_fit)(kv, iw, krow, 3) < 3;
+              int kvx = icon ? ix + uw + 6 : ix, kvw = ix + iw - kvx;
+              // unified sizes: tier 1 = indoor + climate target, tier 2 = roof + power
+              int f1 = std::min(id(f_fit)(vin, ibw, ibh - lab, 3), id(f_fit)(kv, kvw, krow, 3));
+              int f2 = std::min(id(f_fit)(vroof, rbw, rbh, 3), id(f_fit)(pv, iw, prow - 4, 3));
+              if (f2 > f1) f2 = f1;
+              if (rbh >= 14) id(f_strt)(ax - rbw / 2, rby, rbw, rbh, f2, rc, 1, vroof);
+              if (lab) id(f_strt)(ibx, iby, ibw, lab, 1, DIM, 1, "W domu");
+              if (ibh - lab >= 16) id(f_strt)(ibx, iby + lab, ibw, ibh - lab, f1, 65535, 1, vin);
+              if (iw >= 40 && ih >= 40) {
+                // climate: unit icon + target, then mode
+                int uy = iy + (krow - uh) / 2;
+                if (icon) {
+                  id(f_fill)(ix, uy, uw, 3, kc);
+                  id(f_fill)(ix, uy + uh - 3, uw, 3, kc);
+                  id(f_fill)(ix, uy, 3, uh, kc);
+                  id(f_fill)(ix + uw - 3, uy, 3, uh, kc);
+                  id(f_fill)(ix + 6, uy + uh - 7, uw - 12, 2, kc);
+                }
+                id(f_strt)(kvx, iy, kvw, krow, f1, koff ? DIM : 65535, 1, kv);
+                if (mrow && !koff) {
+                  std::string m = id(f_lbl)(0, id(k_st));
+                  if (!id(k_fan).empty() && id(f_fit)(m + " · " + id(f_lbl)(2, id(k_fan)), iw, mrow, 1) >= 1) m += " · " + id(f_lbl)(2, id(k_fan));
+                  id(f_strt)(ix, iy + krow, iw, mrow, id(f_fit)(m, iw, mrow, 1), kc, 1, m);
+                }
+                // power
+                int py = iy + krow + mrow;
+                id(f_fill)(ix, py, iw, 2, id(f_mix)(id(f_skyy)(py), 65535, 0.35f));
+                if (prow >= 18) id(f_strt)(ix, py + 3, iw, prow - 4, f2, hpw ? id(f_heat)(frac) : DIM, 1, pv);
+              }
+            };
+            // draw one layout tile
+            id(f_ltile) = [](int i) {
+              int x, y, w, h;
+              id(f_trect)(i, x, y, w, h);
+              const std::string &t = id(lt_t)[i];
+              id(lt_shown)[i] = id(f_lkey)(i);
+              if (t == "W") { id(f_wtile)(); return; }
+              if (t == "V" && id(lt_o2)[i] == "g13") { id(f_g13)(i, x, y, w, h); return; }
+              if (t == "V" && id(lt_o2)[i] == "dom") { id(f_dtile)(i, x, y, w, h); return; }
+              int TL = id(f_tbg)(), acc = id(f_acc)(i);
+              int pad = w >= 120 ? 10 : 6;
+              int top = y + 8;
+              if (t == "C") {
+                std::string c = id(lt_shown)[i];
+                id(f_tbody)(x, y, w, h, TL, acc);
+                id(f_str)(x + 4, y + 6, w - 8, h - 8, id(f_fit)(c, w - 12, h - 8, 4), 65535, TL, 1, c);
+                return;
+              }
+              if (t == "T") {
+                const std::string &s = id(lt_s)[i];
+                std::string d = id(lt_e)[i].substr(0, id(lt_e)[i].find('.'));
+                bool on = (s == "on" || s == "open" || s == "playing" || s == "unlocked" || s == "heat" || s == "cool");
+                int bg = on ? id(f_mix)(TL, acc, 0.85f) : TL, fg = on ? 4226 : 65535;
+                id(f_tbody)(x, y, w, h, bg, acc);
+                const std::string &l = id(lt_l)[i];
+                int lh = h >= 90 ? h - 42 : h - 12;
+                id(f_str)(x + pad, top, w - 2 * pad, lh, id(f_fit)(l, w - 2 * pad - 4, lh, 2), fg, bg, 1, l);
+                if (h >= 90) {
+                  std::string st = (s == "unavailable" || s == "unknown") ? std::string("n/d") : (on ? std::string("Wł.") : std::string("Wył."));
+                  if (d == "scene" || d == "script") st = "Uruchom";
+                  id(f_str)(x + pad, y + h - 36, w - 2 * pad, 30, 1, on ? 4226 : id(f_rgb)(200, 206, 220), bg, 1, st);
+                }
+                return;
+              }
+              id(f_tbody)(x, y, w, h, TL, acc);
+              int lh = h >= 100 ? 30 : 22;
+              if (t == "K") {
+                bool off = id(k_st) == "off" || id(k_id).empty();
+                std::string lab = id(lt_l)[i].empty() ? std::string("Klimatyzacja") : id(lt_l)[i];
+                if (lab == "Klimatyzacja" && id(f_fit)(lab, w - 2 * pad, 28, 1) < 1) lab = "Klima";
+                id(f_label)(x + pad, top, w - 2 * pad, lh, TL, lab);
+                int tail = h >= 140 ? 56 : (h >= 105 ? 30 : 0);
+                int vy = top + lh, vh = y + h - 4 - tail - vy;
+                std::string val = id(f_kval)();
+                if (vh >= 16) id(f_str)(x + 4, vy, w - 8, vh, id(f_fit)(val, w - 12, vh, (w >= 180 && vh >= 72) ? 4 : 3), off ? id(f_rgb)(150, 156, 170) : 65535, TL, 1, val);
+                if (!off && tail >= 30) {
+                  std::string m = id(f_lbl)(0, id(k_st));
+                  id(f_str)(x + 4, y + h - 4 - tail, w - 8, 28, id(f_fit)(m, w - 12, 28, 1), acc, TL, 1, m);
+                }
+                if (!off && tail >= 56 && !id(k_fan).empty()) {
+                  std::string fn = id(f_lbl)(2, id(k_fan));
+                  std::string f = "Nawiew: " + fn;
+                  if (id(f_fit)(f, w - 12, 26, 1) < 1) f = fn;
+                  id(f_str)(x + 4, y + h - 30, w - 8, 26, id(f_fit)(f, w - 12, 26, 1), id(f_rgb)(200, 206, 220), TL, 1, f);
+                }
+                return;
+              }
+              // V / B
+              std::string lbl, val;
+              float frac;
+              id(f_lval)(i, lbl, val, frac);
+              // label with unit; if it does not fit at 24 px move a degree unit into the value
+              std::string base = id(lt_l)[i];
+              if (lh >= 28 && id(f_fit)(lbl, w - 2 * pad, 28, 1) < 1 && !base.empty()) {
+                if (lbl.find("°") != std::string::npos && val != "--") val += "°";
+                lbl = base;
+              }
+              id(f_label)(x + pad, top, w - 2 * pad, lh, TL, lbl);
+              int bar = (t == "B") ? 30 : 6;
+              int vy = top + lh, vh = y + h - bar - vy;
+              int mf = (w >= 180 && vh >= 72) ? 4 : 3;
+              if (vh >= 16) id(f_str)(x + 4, vy, w - 8, vh, id(f_fit)(val, w - 12, vh, mf), 65535, TL, 1, val);
+              if (t == "B") {
+                int bx = x + pad, bw = w - 2 * pad, by = y + h - 24, bh = 14;
+                id(f_fill)(bx, by, bw, bh, id(f_mix)(TL, 0, 0.55f));
+                int fw = (int) (bw * frac + 0.5f);
+                for (int sx = 0; sx < fw; sx += 6) {
+                  int sw = std::min(6, fw - sx);
+                  id(f_fill)(bx + sx, by, sw, bh, id(f_heat)((sx + sw * 0.5f) / bw));
+                }
+              }
+            };
+            // redraw every tile of the given entity / type when its content changed
+            id(f_lupdate) = [](const std::string &eid, const std::string &type) {
+              if (id(m_on) || id(v_view) != 5 || id(g_sync) || id(disp).is_sleeping()) return;
+              for (int i = 0; i < (int) id(lt_t).size(); i++) {
+                if (!eid.empty() && id(lt_e)[i] != eid) continue;
+                if (!type.empty() && id(lt_t)[i] != type) continue;
+                if (id(f_lkey)(i) != id(lt_shown)[i]) id(f_ltile)(i);
+              }
+            };
+            // parse layout lines into lt_* (used by the uklad action and the built-in default)
+            id(f_lload) = [](const std::string &lines) {
+              id(lt_t).clear(); id(lt_c).clear(); id(lt_r).clear(); id(lt_w).clear(); id(lt_h).clear();
+              id(lt_e).clear(); id(lt_l).clear(); id(lt_o1).clear(); id(lt_o2).clear(); id(lt_s).clear();
+              id(lt_x).clear(); id(lt_shown).clear();
+              id(wr_x) = id(wr_y) = id(wr_w) = id(wr_h) = 0;
+              size_t p = 0;
+              while (p < lines.size() && id(lt_t).size() < 24) {
+                size_t e = lines.find('\n', p);
+                if (e == std::string::npos) e = lines.size();
+                std::string L = lines.substr(p, e - p);
+                p = e + 1;
+                if (L.size() < 9) continue;
+                std::string t = id(f_fld)(L, 0);
+                if (t.size() != 1 || std::string("WCVBTK").find(t) == std::string::npos) continue;
+                int c = atoi(id(f_fld)(L, 1).c_str()), r = atoi(id(f_fld)(L, 2).c_str());
+                int w = atoi(id(f_fld)(L, 3).c_str()), h = atoi(id(f_fld)(L, 4).c_str());
+                if (c < 0 || r < 0 || w < 1 || h < 1 || c + w > 24 || r + h > 16) continue;
+                id(lt_t).push_back(t); id(lt_c).push_back(c); id(lt_r).push_back(r); id(lt_w).push_back(w); id(lt_h).push_back(h);
+                id(lt_e).push_back(id(f_fld)(L, 5)); id(lt_l).push_back(id(f_fld)(L, 6));
+                id(lt_o1).push_back(id(f_fld)(L, 7)); id(lt_o2).push_back(id(f_fld)(L, 8));
+                id(lt_s).push_back(id(f_fld)(L, 9)); id(lt_x).push_back(id(f_fld)(L, 10));
+                id(lt_shown).push_back("");
+                if (t == "W" && id(wr_w) == 0) { id(wr_noclock) = id(f_fld)(L, 7) == "0"; id(wr_x) = c * 20 + 2; id(wr_y) = r * 20 + 2; id(wr_w) = w * 20 - 4; id(wr_h) = h * 20 - 4; }
+              }
+              id(f_wzones)();
+            };
+            id(f_overview) = []() {
+              int sb = id(f_sbg)();
+              id(f_fill)(0, 0, 480, 320, sb);
+              if (id(lt_t).empty()) {
+                id(f_str)(20, 120, 440, 36, 1, 61278, sb, 1, "Brak układu ekranu");
+                id(f_str)(20, 160, 440, 30, 0, 35988, sb, 1, "Ułóż kafelki w edytorze NSPanel Dom w HA");
+                return;
+              }
+              for (int i = 0; i < (int) id(lt_t).size(); i++) id(f_ltile)(i);
+            };
+            // touch on the home screen: returns true if handled
+            id(f_ltouch) = [](int x, int y) -> bool {
+              for (int i = 0; i < (int) id(lt_t).size(); i++) {
+                int tx, ty, tw, th;
+                id(f_trect)(i, tx, ty, tw, th);
+                if (x < tx || x >= tx + tw || y < ty || y >= ty + th) continue;
+                const std::string &t = id(lt_t)[i];
+                if (t == "W") { id(v_view) = 6; id(f_draw)(); return true; }
+                if (t == "K") { id(v_view) = 7; id(f_draw)(); return true; }
+                if (t == "V" && id(lt_o2)[i] == "dom" && !id(k_id).empty()) { id(v_view) = 7; id(f_draw)(); return true; }
+                if (t == "T") {
+                  const std::string e = id(lt_e)[i];
+                  if (e.empty()) return true;
+                  std::string d = e.substr(0, e.find('.'));
+                  std::string act = (d == "scene") ? "scene.turn_on" : (d == "script" ? "script.turn_on" : "homeassistant.toggle");
+                  if (id(lt_s)[i] == "on") id(lt_s)[i] = "off"; else if (id(lt_s)[i] == "off") id(lt_s)[i] = "on";
+                  id(ha_call).execute(act, e);
+                  id(f_ltile)(i);
+                  return true;
+                }
+                return false;
+              }
+              return false;
+            };
+
+            // forecast card: 8 hours on top, 5 days below
+            id(f_forecast) = []() {
+              id(f_top)("Prognoza pogody", "<", "");
+              id(f_fill)(0, 40, 480, 280, 2146);
+              auto &H = id(fc_h);
+              auto &D = id(fc_d);
+              if (H.empty() && D.empty()) {
+                id(f_str)(20, 140, 440, 36, 1, 61278, 2146, 1, "Brak prognozy z Home Assistant");
+                return;
+              }
+              int ytop = 44;
+              if (!H.empty()) {
+                int n = std::min((int) H.size(), 8);
+                for (int k = 0; k < n; k++) {
+                  const std::string &L = H[k];
+                  int x = 4 + k * 59, bg = 10599;
+                  id(f_fill)(x, ytop, 57, 108, bg);
+                  id(f_str)(x, ytop + 2, 57, 20, 0, 61278, bg, 1, id(f_fld)(L, 0));
+                  id(f_micon)(x + 28, ytop + 36, id(f_fld)(L, 1), bg);
+                  std::string t = id(f_fld)(L, 2);
+                  id(f_str)(x, ytop + 54, 57, 28, 1, 65535, bg, 1, t.empty() ? std::string("--") : t + "°");
+                  std::string pr = id(f_fld)(L, 3), mm = id(f_fld)(L, 4);
+                  std::string pt = !pr.empty() ? pr + "%" : (!mm.empty() ? mm : std::string(""));
+                  id(f_str)(x, ytop + 84, 57, 22, 0, id(f_rgb)(130, 180, 255), bg, 1, pt);
+                }
+                ytop += 112;
+              }
+              int rows = std::min((int) D.size(), H.empty() ? 8 : 5);
+              for (int r = 0; r < rows; r++) {
+                const std::string &L = D[r];
+                int y = ytop + r * 32, bg = (r % 2) ? 6372 : 10599;
+                id(f_fill)(4, y, 472, 30, bg);
+                id(f_str)(8, y, 70, 30, 1, 65535, bg, 0, id(f_fld)(L, 0));
+                id(f_micon)(96, y + 13, id(f_fld)(L, 1), bg);
+                id(f_str)(114, y, 136, 30, 0, 61278, bg, 0, id(f_wname)(id(f_fld)(L, 1)));
+                std::string hi = id(f_fld)(L, 2), lo = id(f_fld)(L, 3);
+                std::string tt = (hi.empty() ? std::string("--") : hi + "°") + (lo.empty() ? std::string("") : " / " + lo + "°");
+                id(f_str)(250, y, 104, 30, 1, 65535, bg, 1, tt);
+                std::string pr = id(f_fld)(L, 4), mm = id(f_fld)(L, 5);
+                std::string pt = pr.empty() ? std::string("") : pr + "%";
+                if (!mm.empty()) pt += (pt.empty() ? "" : " ") + mm + "mm";
+                id(f_str)(356, y, 116, 30, 0, id(f_rgb)(130, 180, 255), bg, 2, pt);
+              }
+            };
+
+            // ---------------- climate ----------------
+            // f_lbl(kind, value): 0 hvac long, 1 hvac short, 2 fan, 3 swing, 4 preset
+            id(f_lbl) = [](int kind, const std::string &v) -> std::string {
+              std::string l = v;
+              for (auto &c : l) { c = tolower(c); if (c == ' ' || c == '-') c = '_'; }
+              if (kind <= 1) {
+                if (l == "off") return "Wył.";
+                if (l == "heat") return "Grzanie";
+                if (l == "cool") return kind == 0 ? "Chłodzenie" : "Chłodz.";
+                if (l == "auto" || l == "heat_cool") return "Auto";
+                if (l == "dry") return kind == 0 ? "Osuszanie" : "Osusz.";
+                if (l == "fan_only") return kind == 0 ? "Wentylator" : "Went.";
+                return v;
+              }
+              if (kind == 2) {
+                if (l == "auto") return "Auto";
+                if (l == "quiet" || l == "silent") return "Cichy";
+                if (l == "low") return "Niski";
+                if (l == "medium_low" || l == "mediumlow") return "Śr.-niski";
+                if (l == "medium" || l == "mid") return "Średni";
+                if (l == "medium_high" || l == "mediumhigh") return "Śr.-wys.";
+                if (l == "high") return "Wysoki";
+                if (l == "turbo" || l == "boost") return "Turbo";
+                return v;
+              }
+              if (kind == 3) {
+                if (l == "off" || l == "default" || l == "fixed") return "Stały";
+                if (l == "on" || l == "swing") return "Ruchomy";
+                if (l == "vertical") return "Pion";
+                if (l == "horizontal") return "Poziom";
+                if (l == "both") return "Pion + poziom";
+                if (l.find("full") != std::string::npos) return "Pełny zakres";
+                if (l.find("upmost") != std::string::npos || l.find("top") != std::string::npos) return "Góra";
+                if (l.find("lowest") != std::string::npos || l.find("bottom") != std::string::npos) return "Dół";
+                if (l.find("middle") != std::string::npos) return "Środek";
+                return v;
+              }
+              if (l == "none") return "Brak";
+              if (l == "eco") return "Eco";
+              if (l == "boost") return "Turbo";
+              if (l == "sleep") return "Sen";
+              if (l == "away") return "Poza domem";
+              if (l == "comfort") return "Komfort";
+              return v;
+            };
+            id(f_hvc) = [](const std::string &m) -> int {
+              if (m == "heat") return 64359;
+              if (m == "cool") return 17599;
+              if (m == "auto" || m == "heat_cool") return 11828;
+              if (m == "dry") return id(f_rgb)(200, 160, 255);
+              if (m == "fan_only") return id(f_rgb)(180, 205, 215);
+              return 35988;
+            };
+            // climate control screen (view 7)
+            id(f_klima) = []() {
+              std::string cur = id(k_cur);
+              std::string title = "Klimatyzacja";
+              if (!cur.empty() && cur != "None") title += "  (" + id(f_fmt)(cur) + "° w pom.)";
+              id(f_top)(title, "<", "");
+              id(f_fill)(0, 40, 480, 280, 2146);
+              if (id(k_id).empty()) { id(f_str)(20, 140, 440, 36, 1, 61278, 2146, 1, "Brak encji klimatyzacji z HA"); return; }
+              bool off = id(k_st) == "off";
+              id(f_str)(4, 44, 80, 58, 3, 61278, 14858, 1, "-");
+              id(f_str)(396, 44, 80, 58, 3, 61278, 14858, 1, "+");
+              std::string t = id(k_tgt);
+              std::string tv = (t.empty() || t == "None") ? std::string("--") : id(f_fmt)(t) + "°";
+              id(f_str)(88, 44, 304, 58, 3, off ? 35988 : id(f_hvc)(id(k_st)), 2146, 1, tv);
+              auto &H = id(k_hm);
+              int n = std::min((int) H.size(), 6);
+              if (n > 0) {
+                int bw = 472 / n;
+                for (int k = 0; k < n; k++) {
+                  bool a = H[k] == id(k_st);
+                  id(f_str)(4 + k * bw, 108, bw - 4, 48, bw >= 100 ? 1 : 0, a ? 4226 : 61278, a ? id(f_hvc)(H[k]) : 14858, 1, id(f_lbl)(1, H[k]));
+                }
+              }
+              auto &F = id(k_fm);
+              int nf = std::min((int) F.size(), 8);
+              int per = nf > 4 ? (nf + 1) / 2 : std::max(nf, 1);
+              for (int k = 0; k < nf; k++) {
+                int bw = 472 / per, r = k / per, c = k % per;
+                bool a = F[k] == id(k_fan);
+                id(f_str)(4 + c * bw, 162 + r * 46, bw - 4, 42, 0, a ? 4226 : 61278, a ? 11828 : 14858, 1, id(f_lbl)(2, F[k]));
+              }
+              std::string sw = "Kierunek: " + id(f_lbl)(3, id(k_swing));
+              std::string pr = "Tryb: " + id(f_lbl)(4, id(k_preset));
+              if (!id(k_sm).empty()) id(f_str)(4, 256, 234, 58, id(f_len)(sw) <= 18 ? 1 : 0, 61278, 14858, 1, sw);
+              if (!id(k_pm).empty()) id(f_str)(242, 256, 234, 58, id(f_len)(pr) <= 18 ? 1 : 0, 61278, 14858, 1, pr);
+            };
+            id(f_ktouch) = [](int x, int y) {
+              const std::string e = id(k_id);
+              if (e.empty()) return;
+              if (y >= 44 && y < 104 && (x < 86 || x >= 394)) {
+                float t = strtof(id(k_tgt).c_str(), nullptr);
+                if (t <= 0.0f) return;
+                float st = id(k_step) > 0 ? id(k_step) : 1.0f;
+                t += (x < 86) ? -st : st;
+                if (id(k_tmin) > 0 && t < id(k_tmin)) t = id(k_tmin);
+                if (id(k_tmax) > 0 && t > id(k_tmax)) t = id(k_tmax);
+                char b[16];
+                snprintf(b, sizeof(b), "%.1f", t);
+                id(k_tgt) = b;
+                id(k_hold) = millis() + 4000;
+                id(ha_temp).execute(e, t);
+                id(f_draw)();
+                return;
+              }
+              if (y >= 108 && y < 158) {
+                int n = std::min((int) id(k_hm).size(), 6);
+                if (n == 0) return;
+                int k = (x - 4) / (472 / n);
+                if (k < 0 || k >= n) return;
+                id(k_st) = id(k_hm)[k];
+                id(k_hold) = millis() + 4000;
+                id(ha_hvac).execute(e, id(k_hm)[k]);
+                id(f_draw)();
+                return;
+              }
+              int nf = std::min((int) id(k_fm).size(), 8);
+              if (y >= 162 && y < 252 && nf > 0) {
+                int per = nf > 4 ? (nf + 1) / 2 : nf;
+                int r = (y - 162) / 46, c = (x - 4) / (472 / per);
+                int k = r * per + c;
+                if (c < 0 || c >= per || k >= nf) return;
+                id(k_fan) = id(k_fm)[k];
+                id(k_hold) = millis() + 4000;
+                id(ha_fan).execute(e, id(k_fm)[k]);
+                id(f_draw)();
+                return;
+              }
+              if (y >= 256) {
+                auto &L = (x < 240) ? id(k_sm) : id(k_pm);
+                if (L.empty()) return;
+                std::string &cur = (x < 240) ? id(k_swing) : id(k_preset);
+                size_t i = 0;
+                while (i < L.size() && L[i] != cur) i++;
+                cur = L[(i + 1) % L.size()];
+                id(k_hold) = millis() + 4000;
+                if (x < 240) id(ha_swing).execute(e, cur);
+                else id(ha_preset).execute(e, cur);
+                id(f_draw)();
+              }
+            };
+
+            // ---------------- full view redraw ----------------
+            id(f_draw0) = []() {
+              id(q_cmd).clear();
+              if (!id(disp).is_setup() || id(disp).is_sleeping()) { id(g_dirty) = true; return; }
+              id(g_dirty) = false;
+              if (id(p_uiw) < 480) id(f_cmd)("fill " + std::to_string(id(p_uiw)) + ",0," + std::to_string(480 - id(p_uiw)) + ",320,0");
+              if (id(v_view) == 6) { id(f_forecast)(); return; }
+              if (id(v_view) == 7) { id(f_klima)(); return; }
+              if (id(v_view) == 5) {
+                if (id(o_ok)) { id(f_overview)(); return; }
+                id(v_view) = 0;
+              }
+              int na = id(a_name).size();
+              if (id(g_sync) || na == 0) {
+                id(f_fill)(0, 0, 480, 320, 2146);
+                id(f_top)("Dom", "", "");
+                id(f_str)(20, 120, 440, 40, 1, 61278, 2146, 1, id(g_sync) ? "Synchronizacja z HA..." : "Czekam na dane z Home Assistant");
+                if (!id(g_sync)) id(f_str)(20, 170, 440, 30, 0, 35988, 2146, 1, "Sprawdź pakiet nspanel_dom w HA");
+                return;
+              }
+              if (id(v_area) < 0 || id(v_area) >= na) id(v_area) = 0;
+              int v = id(v_view);
+
+              if (v == 0) {
+                id(v_list) = id(f_room)(id(v_area), true);
+                int n = id(v_list).size();
+                int pages = n > 0 ? (n + 5) / 6 : 1;
+                if (id(v_tpage) >= pages) id(v_tpage) = 0;
+                id(f_top)(id(a_name)[id(v_area)], id(o_ok) ? "Dom" : "<", ">");
+                id(f_fill)(0, 40, 480, 238, 2146);
+                for (int s = 0; s < 6; s++) id(f_tile)(s);
+                if (n == 0) {
+                  id(f_str)(20, 110, 440, 36, 1, 61278, 2146, 1, "Brak wybranych encji");
+                  id(f_str)(20, 150, 440, 30, 0, 35988, 2146, 1, "Dotknij Edytuj, aby wybrać z sugestii");
+                }
+                char pg[32];
+                snprintf(pg, sizeof(pg), "%d / %d", id(v_tpage) + 1, pages);
+                std::string fl = id(a_floor)[id(v_area)];
+                id(f_bot)("Edytuj", fl.empty() ? std::string(pg) : fl + "   " + pg, pages > 1 ? "Strona >" : "", false);
+                return;
+              }
+
+              if (v == 1 || v == 3) {
+                int per = 10;
+                int pages = (na + per - 1) / per;
+                if (id(v_rpage) >= pages) id(v_rpage) = 0;
+                if (v == 1) id(f_top)("Pomieszczenia", "<", "Jasn.");
+                else id(f_top)("Przenieś: " + id(g_name)[id(v_pick)], "<", "");
+                id(f_fill)(0, 40, 480, 238, 2146);
+                for (int s = 0; s < per; s++) {
+                  int a = id(v_rpage) * per + s;
+                  if (a >= na) break;
+                  int x = 4 + (s % 2) * 238, y = 44 + (s / 2) * 46;
+                  bool cur = (v == 1) ? (a == id(v_area)) : (a == id(g_area)[id(v_pick)]);
+                  std::string lbl = id(a_name)[a];
+                  if (v == 1) lbl += " (" + std::to_string(id(f_room)(a, true).size()) + ")";
+                  id(f_str)(x, y, 234, 42, 0, cur ? 4226 : 61278, cur ? 11828 : 10599, 1, lbl);
+                }
+                id(f_bot)(pages > 1 ? "< Strona" : "", v == 1 ? "Odśwież z HA" : "Anuluj", pages > 1 ? "Strona >" : "", true);
+                return;
+              }
+
+              if (v == 2) {
+                id(v_list) = id(f_room)(id(v_area), false);
+                int per = 5;
+                int n = id(v_list).size();
+                int pages = n > 0 ? (n + per - 1) / per : 1;
+                if (id(v_epage) >= pages) id(v_epage) = 0;
+                id(f_top)("Edycja: " + id(a_name)[id(v_area)], "<", "");
+                id(f_fill)(0, 40, 480, 238, 2146);
+                if (n == 0) id(f_str)(20, 120, 440, 36, 1, 61278, 2146, 1, "Brak encji w tym pomieszczeniu");
+                for (int s = 0; s < per; s++) {
+                  int k = id(v_epage) * per + s;
+                  if (k >= n) break;
+                  int i = id(v_list)[k];
+                  int y = 44 + s * 46;
+                  bool sh = id(f_shown)(i);
+                  id(f_str)(4, y, 42, 42, 1, 4226, sh ? 17997 : 10599, 1, sh ? "+" : "");
+                  id(f_fill)(50, y, 310, 42, 10599);
+                  id(f_str)(56, y + 1, 300, 21, 0, 61278, 10599, 0, id(g_name)[i]);
+                  std::string sub = id(g_eid)[i];
+                  if (id(g_sug)[i]) sub = "* " + sub;
+                  id(f_str)(56, y + 22, 300, 19, 0, 35988, 10599, 0, sub);
+                  id(f_str)(364, y, 112, 42, 0, 61278, 14858, 1, "Pokój");
+                }
+                char pg[40];
+                snprintf(pg, sizeof(pg), "%d / %d   * sugerowane", id(v_epage) + 1, pages);
+                id(f_bot)(pages > 1 ? "< Strona" : "", pg, pages > 1 ? "Strona >" : "", false);
+                return;
+              }
+
+              // v == 4 : detail
+              int i = id(v_det);
+              if (i < 0 || i >= (int) id(g_eid).size()) { id(v_view) = 0; id(f_draw)(); return; }
+              std::string d = id(f_dom)(i);
+              bool on = id(f_on)(i);
+              const std::string x = id(g_ex)[i];
+              id(f_top)(id(g_name)[i], "<", "");
+              id(f_fill)(0, 40, 480, 280, 2146);
+              id(f_str)(20, 50, 440, 72, 3, on ? id(f_col)(i) : 61278, 2146, 1, id(f_val)(i));
+              if (d == "light") {
+                int pct = on ? atoi(x.c_str()) : 0;
+                id(f_str)(4, 140, 52, 44, 1, 61278, 14858, 1, "-");
+                id(f_fill)(60, 140, 360, 44, 10599);
+                if (pct > 0) id(f_fill)(60, 140, 360 * pct / 100, 44, 64900);
+                id(f_str)(424, 140, 52, 44, 1, 61278, 14858, 1, "+");
+                id(f_str)(4, 214, 472, 56, 1, on ? 4226 : 61278, on ? 64900 : 14858, 1, on ? "Wyłącz" : "Włącz");
+              } else if (d == "climate") {
+                std::string t = id(f_part)(x, 1);
+                bool tv = !t.empty() && t != "None";
+                id(f_str)(4, 140, 80, 50, 1, 61278, 14858, 1, "-");
+                id(f_str)(90, 140, 300, 50, 2, 61278, 2146, 1, tv ? "cel: " + id(f_fmt)(t) + "°" : std::string("cel: --"));
+                id(f_str)(396, 140, 80, 50, 1, 61278, 14858, 1, "+");
+                const char *lab[4] = {"Wył.", "Grzanie", "Chłodz.", "Auto"};
+                const char *md[4] = {"off", "heat", "cool", "auto"};
+                for (int k = 0; k < 4; k++) {
+                  bool a = id(g_st)[i] == md[k];
+                  id(f_str)(4 + k * 119, 214, 115, 56, 0, a ? 4226 : 61278, a ? 11828 : 14858, 1, lab[k]);
+                }
+              } else if (d == "cover" || d == "media_player") {
+                const char *lc[3] = {"Otwórz", "Stop", "Zamknij"};
+                const char *lm[3] = {"<<", "Play / Pauza", ">>"};
+                for (int k = 0; k < 3; k++) id(f_str)(4 + k * 158, 214, 154, 56, 1, 61278, 14858, 1, d == "cover" ? lc[k] : lm[k]);
+              } else if (d == "lock") {
+                id(f_str)(4, 214, 234, 56, 1, 61278, 14858, 1, "Zamknij");
+                id(f_str)(242, 214, 234, 56, 1, 61278, 60042, 1, "Otwórz");
+              } else if (d == "switch" || d == "input_boolean" || d == "fan") {
+                id(f_str)(4, 214, 472, 56, 1, on ? 4226 : 61278, on ? 11828 : 14858, 1, on ? "Wyłącz" : "Włącz");
+              } else if (d == "scene" || d == "script") {
+                id(f_str)(4, 214, 472, 56, 1, 61278, 14858, 1, "Uruchom");
+              } else {
+                id(f_str)(20, 150, 440, 30, 0, 35988, 2146, 1, id(g_eid)[i]);
+              }
+            };
+
+            // redraw only what shows entity i
+            id(f_redraw_ent) = [](int i) {
+              if (id(g_sync) || id(m_on)) return;
+              if (id(v_view) == 0) {
+                auto &L = id(v_list);
+                for (int k = 0; k < (int) L.size(); k++) {
+                  if (L[k] != i) continue;
+                  int s = k - id(v_tpage) * 6;
+                  if (s >= 0 && s < 6) id(f_tile)(s);
+                }
+              } else if (id(v_view) == 4 && id(v_det) == i) {
+                id(f_draw)();
+              }
+            };
+
+            // ---------------- actions ----------------
+            id(f_act) = [](int i) {
+              std::string d = id(f_dom)(i);
+              const std::string e = id(g_eid)[i];
+              if (d == "light" || d == "switch" || d == "input_boolean" || d == "fan") {
+                id(g_st)[i] = id(g_st)[i] == "on" ? "off" : "on";
+                id(ha_call).execute(std::string("homeassistant.toggle"), e);
+              } else if (d == "cover") {
+                id(ha_call).execute(std::string("cover.toggle"), e);
+              } else if (d == "climate") {
+                id(ha_call).execute(std::string("climate.toggle"), e);
+              } else if (d == "scene") {
+                id(ha_call).execute(std::string("scene.turn_on"), e);
+              } else if (d == "script") {
+                id(ha_call).execute(std::string("script.turn_on"), e);
+              } else if (d == "media_player") {
+                id(ha_call).execute(std::string("media_player.media_play_pause"), e);
+              } else {
+                id(v_det) = i;
+                id(v_view) = 4;
+                id(f_draw)();
+                return;
+              }
+              id(f_redraw_ent)(i);
+            };
+
+            // ---------------- touch dispatcher ----------------
+            id(f_touch) = [](int cell, bool lp) {
+              int x = ((cell % 16) * 30 + 15) * 480 / id(p_uiw), y = (cell / 16) * 20 + 10;
+              if (id(m_on)) {
+                int by = 34 + 252 - 56;
+                if (y >= by - 6 && y < by + 52) {
+                  if (id(m_btn2).empty()) { if (x >= 240 - 100 && x < 240 + 100) id(f_mclose)("ok"); }
+                  else if (x < 240) id(f_mclose)("ok");
+                  else id(f_mclose)("przycisk");
+                }
+                return;
+              }
+              if (id(v_view) == 6) {
+                id(v_view) = 5;
+                id(f_draw)();
+                return;
+              }
+              if (id(v_view) == 7) {
+                if (y < 40) { if (x < 60) { id(v_view) = 5; id(f_draw)(); } return; }
+                id(f_ktouch)(x, y);
+                return;
+              }
+              if (id(v_view) == 5) {
+                if (!lp && id(f_ltouch)(x, y)) return;
+                if (lp) { id(v_view) = 1; id(v_rpage) = id(v_area) / 10; }
+                else { id(v_view) = 0; id(v_tpage) = 0; }
+                id(f_draw)();
+                return;
+              }
+              int na = id(a_name).size();
+              if (na == 0 || id(g_sync)) return;
+              int v = id(v_view);
+              bool top = y < 40, bot = y >= 278;
+
+              if (v == 0) {
+                if (top) {
+                  if (x < 60) {
+                    if (id(o_ok)) { id(v_view) = 5; id(f_draw)(); return; }
+                    id(v_area) = (id(v_area) + na - 1) % na;
+                  }
+                  else if (x >= 420) id(v_area) = (id(v_area) + 1) % na;
+                  else { id(v_view) = 1; id(v_rpage) = id(v_area) / 10; }
+                  id(v_tpage) = 0;
+                  id(p_area) = id(v_area);
+                  id(f_draw)();
+                  return;
+                }
+                if (bot) {
+                  if (x < 120) { id(v_view) = 2; id(v_epage) = 0; id(f_draw)(); }
+                  else if (x >= 360) { id(v_tpage)++; id(f_draw)(); }
+                  return;
+                }
+                if (y < 44) return;
+                int c = (x - 4) / 159, r = (y - 44) / 118;
+                if (c > 2 || r > 1) return;
+                int k = id(v_tpage) * 6 + r * 3 + c;
+                if (k >= (int) id(v_list).size()) return;
+                int i = id(v_list)[k];
+                if (lp) { id(v_det) = i; id(v_view) = 4; id(f_draw)(); }
+                else id(f_act)(i);
+                return;
+              }
+
+              if (v == 1 || v == 3) {
+                int per = 10, pages = (na + per - 1) / per;
+                if (top) {
+                  if (x < 60) { id(v_view) = (v == 1) ? 0 : 2; id(f_draw)(); }
+                  else if (x >= 420 && v == 1) {
+                    const int lv[4] = {20, 50, 80, 100};
+                    int nb = 20;
+                    for (int k = 0; k < 4; k++) if (lv[k] > id(p_bright)) { nb = lv[k]; break; }
+                    id(p_bright) = nb;
+                    id(disp).set_backlight_brightness(nb / 100.0f);
+                  }
+                  return;
+                }
+                if (bot) {
+                  if (x < 120) id(v_rpage) = (id(v_rpage) + pages - 1) % pages;
+                  else if (x >= 360) id(v_rpage) = (id(v_rpage) + 1) % pages;
+                  else if (v == 1) { id(ha_event).execute(std::string("rescan")); return; }
+                  else id(v_view) = 2;
+                  id(f_draw)();
+                  return;
+                }
+                if (y < 44) return;
+                int c = (x - 4) / 238, r = (y - 44) / 46;
+                if (c > 1 || r > 4) return;
+                int a = id(v_rpage) * per + r * 2 + c;
+                if (a >= na) return;
+                if (v == 1) { id(v_area) = a; id(p_area) = a; id(v_tpage) = 0; id(v_view) = 0; }
+                else { id(f_move)(id(v_pick), a); id(v_view) = 2; }
+                id(f_draw)();
+                return;
+              }
+
+              if (v == 2) {
+                int per = 5;
+                int n = id(v_list).size();
+                int pages = n > 0 ? (n + per - 1) / per : 1;
+                if (top) {
+                  if (x < 60) { id(v_view) = 0; id(v_tpage) = 0; id(f_draw)(); }
+                  return;
+                }
+                if (bot) {
+                  if (x < 120) id(v_epage) = (id(v_epage) + pages - 1) % pages;
+                  else if (x >= 360) id(v_epage) = (id(v_epage) + 1) % pages;
+                  else return;
+                  id(f_draw)();
+                  return;
+                }
+                if (y < 44) return;
+                int r = (y - 44) / 46;
+                if (r > 4) return;
+                int k = id(v_epage) * per + r;
+                if (k >= n) return;
+                int i = id(v_list)[k];
+                if (x >= 364) { id(v_pick) = i; id(v_view) = 3; id(v_rpage) = id(g_area)[i] / 10; }
+                else id(f_setshown)(i, !id(f_shown)(i));
+                id(f_draw)();
+                return;
+              }
+
+              // v == 4 : detail
+              int i = id(v_det);
+              if (i < 0 || i >= (int) id(g_eid).size()) return;
+              if (top) {
+                if (x < 60) { id(v_view) = 0; id(f_draw)(); }
+                return;
+              }
+              std::string d = id(f_dom)(i);
+              const std::string e = id(g_eid)[i];
+              if (d == "light") {
+                if (y >= 140 && y < 190) {
+                  int pct = id(f_on)(i) ? atoi(id(g_ex)[i].c_str()) : 0;
+                  if (x < 60) pct -= 10;
+                  else if (x >= 420) pct += 10;
+                  else pct = (x - 60) * 100 / 360 + 5;
+                  if (pct < 1) pct = 1;
+                  if (pct > 100) pct = 100;
+                  id(g_ex)[i] = std::to_string(pct);
+                  id(g_st)[i] = "on";
+                  id(ha_bright).execute(e, pct);
+                  id(f_draw)();
+                } else if (y >= 214) {
+                  id(f_act)(i);
+                }
+              } else if (d == "climate") {
+                const std::string &ex = id(g_ex)[i];
+                if (y >= 140 && y < 190 && (x < 90 || x >= 390)) {
+                  float t = strtof(id(f_part)(ex, 1).c_str(), nullptr);
+                  if (t <= 0.0f) return;
+                  t += (x < 90) ? -0.5f : 0.5f;
+                  char b[16];
+                  snprintf(b, sizeof(b), "%.1f", t);
+                  id(g_ex)[i] = id(f_part)(ex, 0) + "/" + b + "/" + id(f_part)(ex, 2);
+                  id(ha_temp).execute(e, t);
+                  id(f_draw)();
+                } else if (y >= 214) {
+                  const char *md[4] = {"off", "heat", "cool", "auto"};
+                  int k = (x - 4) / 119;
+                  if (k < 0 || k > 3) return;
+                  id(g_st)[i] = md[k];
+                  id(ha_hvac).execute(e, std::string(md[k]));
+                  id(f_draw)();
+                }
+              } else if (d == "cover" && y >= 214) {
+                const char *a[3] = {"cover.open_cover", "cover.stop_cover", "cover.close_cover"};
+                int k = (x - 4) / 158;
+                if (k >= 0 && k < 3) id(ha_call).execute(std::string(a[k]), e);
+              } else if (d == "media_player" && y >= 214) {
+                const char *a[3] = {"media_player.media_previous_track", "media_player.media_play_pause", "media_player.media_next_track"};
+                int k = (x - 4) / 158;
+                if (k >= 0 && k < 3) id(ha_call).execute(std::string(a[k]), e);
+              } else if (d == "lock" && y >= 214) {
+                id(ha_call).execute(std::string(x < 240 ? "lock.lock" : "lock.unlock"), e);
+              } else if ((d == "switch" || d == "input_boolean" || d == "fan" || d == "scene" || d == "script") && y >= 214) {
+                id(f_act)(i);
+              }
+            };
+
+            // ---------------- messages (popup with OK), sounds ----------------
+            id(f_melody) = [](const std::string &n) -> std::string {
+              if (n.empty() || n == "Brak" || n == "brak" || n == "none") return "";
+              if (n.find(':') != std::string::npos) return n;  // raw RTTTL
+              if (n == "Krótki") return "k:d=16,o=6,b=180:c7";
+              if (n == "Podwójny") return "p:d=16,o=6,b=180:c7,p,c7";
+              if (n == "Kuranty") return "g:d=8,o=5,b=140:e6,c6,d6,4g5,p,g5,d6,e6,4c6";
+              if (n == "Westminster") return "w:d=4,o=5,b=100:e6,c6,d6,2g5,g5,d6,e6,2c6";
+              if (n == "Ostrzeżenie") return "o:d=8,o=6,b=160:e,p,e,p,e";
+              if (n == "Alarm") return "a:d=16,o=6,b=200:a,p,a,p,a,p,a,p,8a";
+              return "p:d=16,o=6,b=180:c7,p,c7";
+            };
+            id(f_sound) = [](const std::string &n) {
+              std::string r = id(f_melody)(n);
+              if (r.empty()) return;
+              id(buzzer).set_gain(id(n_gain).state / 100.0f);
+              id(buzzer).play(r);
+            };
+            // word wrap for font 1 (24 px), honours '\n'
+            id(f_wrap) = [](const std::string &t, int maxw) -> std::vector<std::string> {
+              std::vector<std::string> out;
+              size_t p = 0;
+              while (p <= t.size() && out.size() < 8) {
+                size_t e = t.find('\n', p);
+                if (e == std::string::npos) e = t.size();
+                std::string para = t.substr(p, e - p);
+                p = e + 1;
+                std::string line;
+                size_t q = 0;
+                while (q <= para.size()) {
+                  size_t sp = para.find(' ', q);
+                  if (sp == std::string::npos) sp = para.size();
+                  std::string w = para.substr(q, sp - q);
+                  q = sp + 1;
+                  std::string cand = line.empty() ? w : line + " " + w;
+                  if (!line.empty() && id(f_fit)(cand, maxw, 30, 1) < 1) { out.push_back(line); line = w; }
+                  else line = cand;
+                  if (sp >= para.size()) break;
+                }
+                out.push_back(line);
+                if (e >= t.size()) break;
+              }
+              return out;
+            };
+            // popup box: x 36, y 34, 408 x 252 (logical)
+            id(f_popup) = []() {
+              static const int lc[3][3] = {{70, 150, 255}, {255, 176, 32}, {235, 60, 50}};
+              int L = id(m_lvl) < 0 ? 0 : (id(m_lvl) > 2 ? 2 : id(m_lvl));
+              int acc = id(f_rgb)(lc[L][0], lc[L][1], lc[L][2]);
+              int bg = id(f_rgb)(28, 32, 44), tf = L == 1 ? 4226 : 65535;
+              int x = 36, y = 34, w = 408, h = 252;
+              id(f_fill)(x - 4, y - 4, w + 8, h + 8, 0);
+              id(f_fill)(x, y, w, h, bg);
+              id(f_drect)(x, y, w, h, acc);
+              id(f_drect)(x + 1, y + 1, w - 2, h - 2, acc);
+              id(f_fill)(x, y, w, 42, acc);
+              id(f_str)(x + 12, y + 2, w - 24, 38, id(f_fit)(id(m_title), w - 28, 38, 1), tf, acc, 0, id(m_title));
+              id(f_ptext)(false);
+              int by = y + h - 56;
+              if (id(m_btn2).empty()) {
+                id(f_str)(x + w / 2 - 90, by, 180, 46, 1, tf, acc, 1, "OK");
+              } else {
+                id(f_str)(x + 16, by, w / 2 - 24, 46, 1, tf, acc, 1, "OK");
+                id(f_str)(x + w / 2 + 8, by, w / 2 - 24, 46, id(f_fit)(id(m_btn2), w / 2 - 32, 46, 1), 65535, 14858, 1, id(m_btn2));
+              }
+            };
+            // popup body text; "{s}" = seconds left until auto close (refreshed every second)
+            id(f_ptext) = [](bool clear) {
+              int x = 36, y = 34, w = 408;
+              int bg = id(f_rgb)(28, 32, 44);
+              std::string t = id(m_text);
+              size_t p = t.find("{s}");
+              if (p != std::string::npos) {
+                int left = 0;
+                if (id(m_until) != 0) {
+                  int32_t d = (int32_t) (id(m_until) - millis());
+                  left = d > 0 ? (d + 999) / 1000 : 0;
+                }
+                t.replace(p, 3, std::to_string(left));
+              }
+              if (clear) id(f_fill)(x + 8, y + 46, w - 16, 136, bg);
+              auto lines = id(f_wrap)(t, w - 36);
+              int n = std::min((int) lines.size(), 4);
+              int ty = y + 50 + (4 - n) * 16;
+              for (int k = 0; k < n; k++) id(f_str)(x + 16, ty + k * 32, w - 32, 32, 1, 65535, bg, 1, lines[k]);
+            };
+            // close the popup; what = ok / przycisk / timeout / "" (closed by HA, no event)
+            id(f_mclose) = [](const std::string &what) {
+              if (!id(m_on)) return;
+              id(m_on) = false;
+              id(m_flash_until) = 0;
+              if (!what.empty()) id(ha_msg_event).execute(what, id(m_id));
+              id(disp).set_backlight_brightness(id(p_bright) / 100.0f);
+              id(f_draw)();
+            };
+            // redraw = current view + popup on top
+            id(f_draw) = []() {
+              id(f_draw0)();
+              if (id(m_on)) id(f_popup)();
+            };
+            // built-in start layout: home screen right after boot, replaced by the layout from HA
+            id(f_lload)(std::string("W|0|0|10|16||||||\n") +
+                        "V|10|0|7|8|${e_temp_dom}|W domu||||°C\n" +
+                        "K|17|0|7|8|${e_klima}|Klimatyzacja||||\n" +
+                        "B|10|8|7|8|${e_moc}|Moc||${moc_max}||W\n" +
+                        "V|17|8|7|8|${e_temp_dach}|Na dachu||||°C\n");
+            id(o_ok) = true;
+            id(v_view) = 5;
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+    advanced:
+      # ten egzemplarz: ESP32 rev3.0, bootloader obsluguje SRAM1 jako IRAM
+      minimum_chip_revision: "3.0"
+      sram1_as_iram: true
+
+logger:
+  level: INFO
+
+api:
+  encryption:
+    key: !secret nspanel_api_key
+  on_client_connected:
+    - if:
+        condition:
+          lambda: 'return client_info.find("Home Assistant") != std::string::npos;'
+        then:
+          - delay: 3s
+          - script.execute:
+              id: ha_event
+              what: sync
+  actions:
+    # start of catalog transfer
+    - action: begin
+      variables:
+        count: int
+      then:
+        - lambda: |-
+            ESP_LOGI("dom", "Catalog begin, %d areas", (int) count);
+            id(g_sync) = true;
+            id(g_eid).clear(); id(g_name).clear(); id(g_st).clear(); id(g_ex).clear();
+            id(g_area).clear(); id(g_area0).clear(); id(g_sug).clear(); id(g_sug0).clear();
+            id(a_name).clear(); id(a_floor).clear(); id(v_list).clear();
+            id(f_draw)();
+    # one area: items = lines "entity_id|name|suggested|state|extra"
+    - action: area
+      variables:
+        idx: int
+        name: string
+        floor: string
+        items: string
+      then:
+        - lambda: |-
+            int a = id(a_name).size();
+            id(a_name).push_back(name);
+            id(a_floor).push_back(floor);
+            size_t p = 0;
+            while (p < items.size()) {
+              size_t e = items.find('\n', p);
+              if (e == std::string::npos) e = items.size();
+              std::string ln = items.substr(p, e - p);
+              p = e + 1;
+              if (ln.empty()) continue;
+              std::string f[5];
+              int k = 0;
+              size_t q = 0;
+              while (k < 4) {
+                size_t b = ln.find('|', q);
+                if (b == std::string::npos) break;
+                f[k++] = ln.substr(q, b - q);
+                q = b + 1;
+              }
+              f[k] = ln.substr(q);
+              if (f[0].empty() || f[0].find('.') == std::string::npos || id(g_eid).size() >= 400) continue;
+              int s = (f[2] == "1") ? 1 : 0;
+              id(g_eid).push_back(f[0]);
+              id(g_name).push_back(f[1].empty() ? f[0] : f[1]);
+              id(g_sug).push_back(s);
+              id(g_sug0).push_back(s);
+              id(g_st).push_back(f[3]);
+              id(g_ex).push_back(f[4]);
+              id(g_area).push_back(a);
+              id(g_area0).push_back(a);
+            }
+            ESP_LOGD("dom", "Area %d '%s': total entities %u", (int) idx, name.c_str(), (unsigned) id(g_eid).size());
+    # end of catalog transfer
+    - action: done
+      then:
+        - lambda: |-
+            id(f_apply)();
+            id(g_sync) = false;
+            id(v_area) = id(p_area);
+            id(v_view) = id(o_ok) ? 5 : 0;
+            id(v_tpage) = 0;
+            ESP_LOGI("dom", "Catalog done: %u areas, %u entities", (unsigned) id(a_name).size(), (unsigned) id(g_eid).size());
+            id(f_draw)();
+    # home overview values (strings as sent by HA)
+    - action: overview
+      variables:
+        wx: string
+        elev: string
+        tout: string
+        wi1: string
+        wi2: string
+      then:
+        - lambda: |-
+            bool first = !id(o_ok);
+            int oldpal = id(o_pal);
+            std::string oldwx = id(o_wx);
+            id(o_wx) = wx;
+            id(o_elev) = elev.empty() ? 30.0f : strtof(elev.c_str(), nullptr);
+            id(o_raw)[0] = tout;
+            id(o_wi1) = wi1;
+            id(o_wi2) = wi2;
+            id(o_ok) = true;
+            id(o_pal) = id(f_pal)();
+            if (first && id(v_view) == 0 && (id(t_last) == 0 || millis() - id(t_last) > 30000)) id(v_view) = 5;
+            if (id(v_view) != 5 || id(g_sync)) return;
+            if (first) { id(f_draw)(); return; }
+            if (id(disp).is_sleeping() || id(m_on)) return;
+            if (id(o_pal) != oldpal) { id(f_draw)(); return; }
+            if (wx != oldwx) { id(f_wtile)(); return; }
+            if (id(f_wtval)() != id(o_shown)[0]) id(f_wtemp)(true);
+            if (wi1 + "|" + wi2 != id(o_shown)[6]) id(f_winfo)(true);
+    # home layout from the HA editor, one tile per line:
+    # "type|col|row|cols|rows|entity|label|opt1|opt2|state|extra"
+    - action: uklad
+      variables:
+        lines: string
+      then:
+        - lambda: |-
+            id(f_lload)(lines);
+            ESP_LOGI("dom", "Layout from HA: %u tiles", (unsigned) id(lt_t).size());
+            bool first = !id(o_ok);
+            id(o_ok) = true;
+            if (first && id(v_view) == 0 && (id(t_last) == 0 || millis() - id(t_last) > 30000)) id(v_view) = 5;
+            if (id(v_view) == 5 && !id(g_sync) && !id(disp).is_sleeping()) id(f_draw)();
+    # forecast lines: godz "HH:MM|cond|temp|prob|mm", dni "Label|cond|tmax|tmin|prob|mm"
+    - action: forecast
+      variables:
+        godz: string
+        dni: string
+      then:
+        - lambda: |-
+            auto split = [](const std::string &s, std::vector<std::string> &out) {
+              out.clear();
+              size_t p = 0;
+              while (p < s.size()) {
+                size_t e = s.find('\n', p);
+                if (e == std::string::npos) e = s.size();
+                if (e > p) out.push_back(s.substr(p, e - p));
+                p = e + 1;
+                if (out.size() >= 10) break;
+              }
+            };
+            split(godz, id(fc_h));
+            split(dni, id(fc_d));
+            ESP_LOGI("dom", "Forecast: %u hours, %u days", (unsigned) id(fc_h).size(), (unsigned) id(fc_d).size());
+            if (id(v_view) == 6 && !id(disp).is_sleeping()) id(f_draw)();
+    # climate entity for the home tile and the climate screen (lists comma separated)
+    - action: klima
+      variables:
+        kid: string
+        st: string
+        cur: string
+        tgt: string
+        step: string
+        fan: string
+        swing: string
+        preset: string
+        hm: string
+        fm: string
+        sm: string
+        pm: string
+        tmin: string
+        tmax: string
+      then:
+        - lambda: |-
+            auto csv = [](const std::string &s) -> std::vector<std::string> {
+              std::vector<std::string> o;
+              size_t p = 0;
+              while (p < s.size()) {
+                size_t e = s.find(',', p);
+                if (e == std::string::npos) e = s.size();
+                std::string t = s.substr(p, e - p);
+                while (!t.empty() && t[0] == ' ') t.erase(0, 1);
+                if (!t.empty()) o.push_back(t);
+                p = e + 1;
+              }
+              return o;
+            };
+            id(k_id) = kid;
+            id(k_cur) = cur;
+            id(k_step) = step.empty() ? 1.0f : strtof(step.c_str(), nullptr);
+            id(k_tmin) = tmin.empty() ? 0.0f : strtof(tmin.c_str(), nullptr);
+            id(k_tmax) = tmax.empty() ? 0.0f : strtof(tmax.c_str(), nullptr);
+            id(k_hm) = csv(hm);
+            id(k_fm) = csv(fm);
+            id(k_sm) = csv(sm);
+            id(k_pm) = csv(pm);
+            // keep local (optimistic) values for a few seconds after a touch
+            if ((int32_t) (millis() - id(k_hold)) >= 0) {
+              id(k_st) = st;
+              id(k_tgt) = tgt;
+              id(k_fan) = fan;
+              id(k_swing) = swing;
+              id(k_preset) = preset;
+            }
+            if (id(g_sync) || id(disp).is_sleeping()) return;
+            if (id(v_view) == 7) { id(f_draw)(); return; }
+            id(f_lupdate)("", "K");
+            id(f_lupdate)("", "V");
+    # message window: level 0 info, 1 warning, 2 alarm; czas 0 = until OK; przycisk = 2nd button label
+    - action: wiadomosc
+      variables:
+        tytul: string
+        tresc: string
+        poziom: int
+        dzwiek: string
+        mruganie: int
+        czas: int
+        przycisk: string
+        ident: string
+      then:
+        - lambda: |-
+            id(m_title) = tytul.empty() ? std::string("Wiadomość") : tytul;
+            id(m_text) = tresc;
+            id(m_lvl) = poziom;
+            id(m_btn2) = przycisk;
+            id(m_id) = ident;
+            id(m_on) = true;
+            id(m_until) = czas > 0 ? millis() + (uint32_t) czas * 1000u : 0;
+            id(m_flash_until) = mruganie > 0 ? millis() + (uint32_t) mruganie * 1000u : 0;
+            id(g_dimmed) = false;
+            id(t_last) = millis();
+            id(disp).set_backlight_brightness(id(p_bright) / 100.0f);
+            id(f_sound)(dzwiek);
+            ESP_LOGI("dom", "Message (level %d): %s", (int) poziom, id(m_title).c_str());
+            id(f_draw)();
+    - action: wiadomosc_zamknij
+      variables:
+        ident: string
+      then:
+        - lambda: |-
+            if (ident.empty() || ident == id(m_id)) id(f_mclose)("");
+    - action: dzwiek
+      variables:
+        melodia: string
+      then:
+        - lambda: 'id(f_sound)(melodia);'
+    # live state of one entity
+    - action: state
+      variables:
+        eid: string
+        st: string
+        ex: string
+      then:
+        - lambda: |-
+            auto &E = id(g_eid);
+            for (int i = 0; i < (int) E.size(); i++) {
+              if (E[i] != eid) continue;
+              if (id(g_st)[i] == st && id(g_ex)[i] == ex) break;
+              id(g_st)[i] = st;
+              id(g_ex)[i] = ex;
+              id(f_redraw_ent)(i);
+              break;
+            }
+            bool hit = false;
+            for (int i = 0; i < (int) id(lt_e).size(); i++) {
+              if (id(lt_e)[i] != eid) continue;
+              id(lt_s)[i] = st;
+              if (!ex.empty() || id(lt_t)[i] != "V") id(lt_x)[i] = ex;
+              hit = true;
+            }
+            if (hit) id(f_lupdate)(eid, "");
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap: {}
+
+captive_portal:
+
+http_request:
+  verify_ssl: false
+
+time:
+  - platform: homeassistant
+    id: ha_time
+    on_time:
+      - seconds: 0
+        then:
+          - lambda: |-
+              if (id(m_on) || id(v_view) != 5 || !id(o_ok) || id(g_sync) || id(disp).is_sleeping()) return;
+              id(f_clock)(true);
+              id(f_lupdate)("", "C");
+              id(f_lupdate)("", "V");
+      # hourly chime during the configured hours
+      - minutes: 0
+        seconds: 0
+        then:
+          - lambda: |-
+              if (!id(sw_gong).state) return;
+              auto now = id(ha_time).now();
+              if (!now.is_valid()) return;
+              int h = now.hour, a = (int) id(n_gong_od).state, b = (int) id(n_gong_do).state;
+              bool in = a <= b ? (h >= a && h < b) : (h >= a || h < b);
+              if (in) id(f_sound)(id(sel_gong).current_option().str());
+    on_time_sync:
+      - lambda: |-
+          if (!id(m_on) && id(v_view) == 5 && id(o_ok) && !id(g_sync) && !id(disp).is_sleeping()) { id(f_clock)(true); id(f_lupdate)("", "C"); }
+
+uart:
+  id: tf_uart
+  tx_pin: 16
+  rx_pin: 17
+  baud_rate: 115200
+
+display:
+  - platform: nextion
+    id: disp
+    uart_id: tf_uart
+    tft_url: ${tft_url}
+    auto_wake_on_touch: true
+    exit_reparse_on_start: true
+    on_setup:
+      - lambda: |-
+          // never sleep: the panel dims instead (see interval "dim")
+          id(disp).send_command_printf("thsp=0");
+          id(disp).send_command_printf("thup=1");
+          id(g_dimmed) = false;
+          id(disp).set_backlight_brightness(id(p_bright) / 100.0f);
+          id(v_area) = id(p_area);
+          id(f_draw)();
+    on_sleep:
+      - lambda: 'id(q_cmd).clear();'
+    on_wake:
+      - lambda: |-
+          id(t_wake) = millis();
+          if (id(o_ok)) id(v_view) = 5;
+          id(f_draw)();
+    on_touch:
+      - lambda: |-
+          if (page_id != 0) return;
+          if (millis() - id(t_wake) < 600) return;
+          if (touch_event) {
+            id(t_last) = millis();
+            if (id(g_dimmed)) {
+              // first touch on a dimmed screen only restores brightness
+              id(g_dimmed) = false;
+              id(disp).set_backlight_brightness(id(p_bright) / 100.0f);
+              id(t_cell) = -1;
+              return;
+            }
+            id(t_cell) = component_id;
+            id(t_ms) = millis();
+            return;
+          }
+          if (id(t_cell) < 0) return;
+          int c = id(t_cell);
+          id(t_cell) = -1;
+          id(t_last) = millis();
+          id(f_touch)(c, (millis() - id(t_ms)) > 650);
+
+interval:
+  # paced command queue: max 3 commands / 20 ms (Nextion 1 kB input buffer)
+  - interval: 20ms
+    then:
+      - lambda: |-
+          auto &q = id(q_cmd);
+          if (q.empty()) return;
+          if (!id(disp).is_setup() || id(disp).is_sleeping()) { q.clear(); return; }
+          size_t n = q.size() < 3 ? q.size() : 3;
+          for (size_t k = 0; k < n; k++) id(disp).send_command_printf("%s", q[k].c_str());
+          q.erase(q.begin(), q.begin() + n);
+  # message: auto close after its time
+  - interval: 1s
+    then:
+      - lambda: |-
+          if (id(m_on) && id(m_until) != 0 && (int32_t) (millis() - id(m_until)) >= 0) { id(f_mclose)("timeout"); return; }
+          if (id(m_on) && id(m_text).find("{s}") != std::string::npos && !id(disp).is_sleeping()) id(f_ptext)(true);
+  # message: backlight flashing
+  - interval: 300ms
+    then:
+      - lambda: |-
+          if (id(m_flash_until) == 0) return;
+          if (!id(m_on) || (int32_t) (millis() - id(m_flash_until)) >= 0) {
+            id(m_flash_until) = 0;
+            id(disp).set_backlight_brightness(id(p_bright) / 100.0f);
+            return;
+          }
+          id(m_flash_on) = !id(m_flash_on);
+          id(disp).set_backlight_brightness(id(m_flash_on) ? 1.0f : 0.08f);
+  # redraw after wake if state changed during sleep
+  - interval: 2s
+    then:
+      - lambda: |-
+          if (id(g_dirty) && id(disp).is_setup() && !id(disp).is_sleeping()) id(f_draw)();
+  # dim the backlight after p_dim_s seconds without touch and show the home overview
+  - interval: 1s
+    then:
+      - lambda: |-
+          if (id(g_dimmed) || id(m_on) || !id(disp).is_setup()) return;
+          if (millis() - id(t_last) < (uint32_t) id(p_dim_s) * 1000u) return;
+          id(g_dimmed) = true;
+          id(disp).set_backlight_brightness(id(p_dim) / 100.0f);
+          if (id(o_ok) && id(v_view) != 5 && !id(g_sync)) { id(v_view) = 5; id(f_draw)(); }
+  # back to the home overview after 60 s without touch
+  - interval: 5s
+    then:
+      - lambda: |-
+          if (!id(o_ok) || id(m_on) || id(v_view) == 5 || id(g_sync) || id(disp).is_sleeping()) return;
+          if (millis() - id(t_last) < 60000) return;
+          id(v_view) = 5;
+          id(f_draw)();
+
+script:
+  - id: ha_call
+    mode: queued
+    max_runs: 10
+    parameters:
+      act: string
+      eid: string
+    then:
+      - homeassistant.action:
+          action: !lambda 'return act;'
+          data:
+            entity_id: !lambda 'return eid;'
+  - id: ha_bright
+    mode: restart
+    parameters:
+      eid: string
+      pct: int
+    then:
+      - delay: 400ms
+      - homeassistant.action:
+          action: light.turn_on
+          data:
+            entity_id: !lambda 'return eid;'
+            brightness_pct: !lambda 'return std::to_string(pct);'
+  - id: ha_temp
+    mode: restart
+    parameters:
+      eid: string
+      t: float
+    then:
+      - delay: 1s
+      - homeassistant.action:
+          action: climate.set_temperature
+          data:
+            entity_id: !lambda 'return eid;'
+            temperature: !lambda 'return str_sprintf("%.1f", t);'
+  - id: ha_hvac
+    mode: queued
+    parameters:
+      eid: string
+      mode: string
+    then:
+      - homeassistant.action:
+          action: climate.set_hvac_mode
+          data:
+            entity_id: !lambda 'return eid;'
+            hvac_mode: !lambda 'return mode;'
+  - id: ha_fan
+    mode: queued
+    parameters:
+      eid: string
+      mode: string
+    then:
+      - homeassistant.action:
+          action: climate.set_fan_mode
+          data:
+            entity_id: !lambda 'return eid;'
+            fan_mode: !lambda 'return mode;'
+  - id: ha_swing
+    mode: queued
+    parameters:
+      eid: string
+      mode: string
+    then:
+      - homeassistant.action:
+          action: climate.set_swing_mode
+          data:
+            entity_id: !lambda 'return eid;'
+            swing_mode: !lambda 'return mode;'
+  - id: ha_preset
+    mode: queued
+    parameters:
+      eid: string
+      mode: string
+    then:
+      - homeassistant.action:
+          action: climate.set_preset_mode
+          data:
+            entity_id: !lambda 'return eid;'
+            preset_mode: !lambda 'return mode;'
+  - id: ha_msg_event
+    mode: queued
+    parameters:
+      what: string
+      ident: string
+    then:
+      - homeassistant.event:
+          event: esphome.nspanel_dom
+          data:
+            what: !lambda 'return what;'
+            ident: !lambda 'return ident;'
+  - id: ha_event
+    mode: queued
+    parameters:
+      what: string
+    then:
+      - homeassistant.event:
+          event: esphome.nspanel_dom
+          data:
+            what: !lambda 'return what;'
+
+globals:
+  # catalog (from HA)
+  - id: g_eid
+    type: std::vector<std::string>
+  - id: g_name
+    type: std::vector<std::string>
+  - id: g_st
+    type: std::vector<std::string>
+  - id: g_ex
+    type: std::vector<std::string>
+  - id: g_area
+    type: std::vector<int>
+  - id: g_area0
+    type: std::vector<int>
+  - id: g_sug
+    type: std::vector<int>
+  - id: g_sug0
+    type: std::vector<int>
+  - id: a_name
+    type: std::vector<std::string>
+  - id: a_floor
+    type: std::vector<std::string>
+  - id: g_sync
+    type: bool
+    initial_value: "false"
+  - id: g_dirty
+    type: bool
+    initial_value: "false"
+  - id: q_cmd
+    type: std::vector<std::string>
+  # view state
+  - id: v_view
+    type: int
+    initial_value: "0"
+  - id: v_area
+    type: int
+    initial_value: "0"
+  - id: v_tpage
+    type: int
+    initial_value: "0"
+  - id: v_epage
+    type: int
+    initial_value: "0"
+  - id: v_rpage
+    type: int
+    initial_value: "0"
+  - id: v_det
+    type: int
+    initial_value: "-1"
+  - id: v_pick
+    type: int
+    initial_value: "-1"
+  - id: v_list
+    type: std::vector<int>
+  - id: t_cell
+    type: int
+    initial_value: "-1"
+  - id: t_ms
+    type: uint32_t
+    initial_value: "0"
+  - id: t_wake
+    type: uint32_t
+    initial_value: "0"
+  - id: t_last
+    type: uint32_t
+    initial_value: "0"
+  # home overview
+  - id: o_ok
+    type: bool
+    initial_value: "false"
+  - id: o_wx
+    type: std::string
+  - id: o_elev
+    type: float
+    initial_value: "30.0"
+  - id: o_pal
+    type: int
+    initial_value: "-1"
+  - id: lt_t
+    type: std::vector<std::string>
+  - id: lt_c
+    type: std::vector<int>
+  - id: lt_r
+    type: std::vector<int>
+  - id: lt_w
+    type: std::vector<int>
+  - id: lt_h
+    type: std::vector<int>
+  - id: lt_e
+    type: std::vector<std::string>
+  - id: lt_l
+    type: std::vector<std::string>
+  - id: lt_o1
+    type: std::vector<std::string>
+  - id: lt_o2
+    type: std::vector<std::string>
+  - id: lt_s
+    type: std::vector<std::string>
+  - id: lt_x
+    type: std::vector<std::string>
+  - id: lt_shown
+    type: std::vector<std::string>
+  - id: wr_x
+    type: int
+    initial_value: "0"
+  - id: wr_y
+    type: int
+    initial_value: "0"
+  - id: wr_w
+    type: int
+    initial_value: "0"
+  - id: wr_h
+    type: int
+    initial_value: "0"
+  - id: wz_clock
+    type: int
+    initial_value: "-1"
+  - id: wz_cond
+    type: int
+    initial_value: "-1"
+  - id: wz_temp
+    type: int
+    initial_value: "-1"
+  - id: wz_info
+    type: int
+    initial_value: "-1"
+  - id: m_on
+    type: bool
+    initial_value: "false"
+  - id: m_title
+    type: std::string
+  - id: m_text
+    type: std::string
+  - id: m_btn2
+    type: std::string
+  - id: m_id
+    type: std::string
+  - id: m_lvl
+    type: int
+    initial_value: "0"
+  - id: m_until
+    type: uint32_t
+    initial_value: "0"
+  - id: m_flash_until
+    type: uint32_t
+    initial_value: "0"
+  - id: m_flash_on
+    type: bool
+    initial_value: "false"
+  - id: wz_infon
+    type: int
+    initial_value: "0"
+  - id: wr_noclock
+    type: bool
+    initial_value: "false"
+  - id: wz_temph
+    type: int
+    initial_value: "80"
+  - id: k_id
+    type: std::string
+  - id: k_st
+    type: std::string
+  - id: k_cur
+    type: std::string
+  - id: k_tgt
+    type: std::string
+  - id: k_fan
+    type: std::string
+  - id: k_swing
+    type: std::string
+  - id: k_preset
+    type: std::string
+  - id: k_step
+    type: float
+    initial_value: "1.0"
+  - id: k_tmin
+    type: float
+    initial_value: "0.0"
+  - id: k_tmax
+    type: float
+    initial_value: "0.0"
+  - id: k_hm
+    type: std::vector<std::string>
+  - id: k_fm
+    type: std::vector<std::string>
+  - id: k_sm
+    type: std::vector<std::string>
+  - id: k_pm
+    type: std::vector<std::string>
+  - id: k_hold
+    type: uint32_t
+    initial_value: "0"
+  - id: fc_h
+    type: std::vector<std::string>
+  - id: fc_d
+    type: std::vector<std::string>
+  - id: o_raw
+    type: std::vector<std::string>
+    initial_value: "std::vector<std::string>(5)"
+  - id: o_shown
+    type: std::vector<std::string>
+    initial_value: "std::vector<std::string>(7)"
+  - id: o_wi1
+    type: std::string
+  - id: o_wi2
+    type: std::string
+  # persistent (flash)
+  - id: p_sel
+    type: uint32_t[64]
+    restore_value: true
+  - id: p_mve
+    type: uint32_t[32]
+    restore_value: true
+  - id: p_mva
+    type: uint32_t[32]
+    restore_value: true
+  - id: p_area
+    type: int
+    restore_value: true
+    initial_value: "0"
+  - id: p_bright
+    type: int
+    restore_value: true
+    initial_value: "80"
+  - id: p_dim
+    type: int
+    restore_value: true
+    initial_value: "15"
+  - id: p_uiw
+    type: int
+    restore_value: true
+    initial_value: "456"
+  - id: p_dim_s
+    type: int
+    restore_value: true
+    initial_value: "60"
+  - id: g_dimmed
+    type: bool
+    initial_value: "false"
+  # function table (set in on_boot)
+  - id: f_hash
+    type: std::function<uint32_t(const std::string &)>
+  - id: f_txt
+    type: std::function<std::string(const std::string &, size_t)>
+  - id: f_len
+    type: std::function<int(const std::string &)>
+  - id: f_split
+    type: std::function<void(const std::string &, int, std::string &, std::string &)>
+  - id: f_part
+    type: std::function<std::string(const std::string &, int)>
+  - id: f_fmt
+    type: std::function<std::string(const std::string &)>
+  - id: f_cmd
+    type: std::function<void(const std::string &)>
+  - id: f_sx
+    type: std::function<int(int)>
+  - id: f_fill
+    type: std::function<void(int, int, int, int, int)>
+  - id: f_circ
+    type: std::function<void(int, int, int, int)>
+  - id: f_str
+    type: std::function<void(int, int, int, int, int, int, int, int, const std::string &)>
+  - id: f_dom
+    type: std::function<std::string(int)>
+  - id: f_on
+    type: std::function<bool(int)>
+  - id: f_val
+    type: std::function<std::string(int)>
+  - id: f_col
+    type: std::function<int(int)>
+  - id: f_shown
+    type: std::function<bool(int)>
+  - id: f_setshown
+    type: std::function<void(int, bool)>
+  - id: f_move
+    type: std::function<void(int, int)>
+  - id: f_apply
+    type: std::function<void()>
+  - id: f_room
+    type: std::function<std::vector<int>(int, bool)>
+  - id: f_top
+    type: std::function<void(const std::string &, const std::string &, const std::string &)>
+  - id: f_bot
+    type: std::function<void(const std::string &, const std::string &, const std::string &, bool)>
+  - id: f_tile
+    type: std::function<void(int)>
+  - id: f_draw
+    type: std::function<void()>
+  - id: f_draw0
+    type: std::function<void()>
+  - id: f_melody
+    type: std::function<std::string(const std::string &)>
+  - id: f_sound
+    type: std::function<void(const std::string &)>
+  - id: f_wrap
+    type: std::function<std::vector<std::string>(const std::string &, int)>
+  - id: f_popup
+    type: std::function<void()>
+  - id: f_mclose
+    type: std::function<void(const std::string &)>
+  - id: f_ptext
+    type: std::function<void(bool)>
+  - id: f_wgrp
+    type: std::function<int()>
+  - id: f_grp
+    type: std::function<int(const std::string &)>
+  - id: f_fld
+    type: std::function<std::string(const std::string &, int)>
+  - id: f_micon
+    type: std::function<void(int, int, const std::string &, int)>
+  - id: f_forecast
+    type: std::function<void()>
+  - id: f_lbl
+    type: std::function<std::string(int, const std::string &)>
+  - id: f_hvc
+    type: std::function<int(const std::string &)>
+  - id: f_klima
+    type: std::function<void()>
+  - id: f_ktouch
+    type: std::function<void(int, int)>
+  - id: f_tcls
+    type: std::function<int()>
+  - id: f_pal
+    type: std::function<int()>
+  - id: f_rgb
+    type: std::function<int(int, int, int)>
+  - id: f_sky
+    type: std::function<int(int)>
+  - id: f_line
+    type: std::function<void(int, int, int, int, int)>
+  - id: f_strt
+    type: std::function<void(int, int, int, int, int, int, int, const std::string &)>
+  - id: f_bg
+    type: std::function<void(int, int, int, int)>
+  - id: f_decor
+    type: std::function<void()>
+  - id: f_wname
+    type: std::function<std::string(const std::string &)>
+  - id: f_trect
+    type: std::function<void(int, int &, int &, int &, int &)>
+  - id: f_fit
+    type: std::function<int(const std::string &, int, int, int)>
+  - id: f_wzones
+    type: std::function<void()>
+  - id: f_kval
+    type: std::function<std::string()>
+  - id: f_lval
+    type: std::function<void(int, std::string &, std::string &, float &)>
+  - id: f_lkey
+    type: std::function<std::string(int)>
+  - id: f_wtemp
+    type: std::function<void(bool)>
+  - id: f_wtval
+    type: std::function<std::string()>
+  - id: f_wtile
+    type: std::function<void()>
+  - id: f_ltile
+    type: std::function<void(int)>
+  - id: f_g13
+    type: std::function<void(int, int, int, int, int)>
+  - id: f_dtile
+    type: std::function<void(int, int, int, int, int)>
+  - id: f_skyy
+    type: std::function<int(int)>
+  - id: f_skyfill
+    type: std::function<void(int, int, int, int)>
+  - id: f_mix
+    type: std::function<int(int, int, float)>
+  - id: f_sbg
+    type: std::function<int()>
+  - id: f_tbg
+    type: std::function<int()>
+  - id: f_acc
+    type: std::function<int(int)>
+  - id: f_drect
+    type: std::function<void(int, int, int, int, int)>
+  - id: f_tbody
+    type: std::function<void(int, int, int, int, int, int)>
+  - id: f_label
+    type: std::function<void(int, int, int, int, int, const std::string &)>
+  - id: f_lupdate
+    type: std::function<void(const std::string &, const std::string &)>
+  - id: f_ltouch
+    type: std::function<bool(int, int)>
+  - id: f_overview
+    type: std::function<void()>
+  - id: f_lload
+    type: std::function<void(const std::string &)>
+  - id: f_heat
+    type: std::function<int(float)>
+  - id: f_clock
+    type: std::function<void(bool)>
+  - id: f_winfo
+    type: std::function<void(bool)>
+  - id: f_redraw_ent
+    type: std::function<void(int)>
+  - id: f_act
+    type: std::function<void(int)>
+  - id: f_touch
+    type: std::function<void(int, bool)>
+
+# ---------------- NSPanel hardware ----------------
+switch:
+  - platform: gpio
+    id: screen_power
+    name: Zasilanie ekranu
+    entity_category: config
+    pin:
+      number: 4
+      inverted: true
+    restore_mode: ALWAYS_ON
+  - platform: template
+    id: sw_gong
+    name: Gong co godzinę
+    icon: mdi:bell-ring-outline
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    id: sw_kor
+    name: "Korytarz: okno po włączeniu"
+    icon: mdi:lightbulb-on-outline
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    id: sw_przyp
+    name: Przypomnienie o świetle
+    icon: mdi:lightbulb-alert
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: gpio
+    id: relay_1
+    name: Przekaźnik 1
+    pin: 22
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: gpio
+    id: relay_2
+    name: Przekaźnik 2
+    pin: 19
+    restore_mode: RESTORE_DEFAULT_OFF
+
+binary_sensor:
+  - platform: status
+    name: Status
+  - platform: gpio
+    id: btn_left
+    name: Przycisk lewy
+    pin:
+      number: 14
+      inverted: true
+    on_click:
+      - switch.toggle: relay_1
+  - platform: gpio
+    id: btn_right
+    name: Przycisk prawy
+    pin:
+      number: 27
+      inverted: true
+    on_click:
+      - switch.toggle: relay_2
+
+sensor:
+  - platform: wifi_signal
+    name: WiFi
+    update_interval: 60s
+    entity_category: diagnostic
+  - platform: adc
+    id: ntc_source
+    pin: 38
+    update_interval: 10s
+    attenuation: 12db
+  - platform: resistance
+    id: resistance_sensor
+    sensor: ntc_source
+    configuration: DOWNSTREAM
+    resistor: 11.2kOhm
+  - platform: ntc
+    id: temperature
+    sensor: resistance_sensor
+    name: Temperatura
+    calibration:
+      b_constant: 3950
+      reference_temperature: 25°C
+      reference_resistance: 10kOhm
+    filters:
+      - sliding_window_moving_average:
+          window_size: 6
+          send_every: 6
+
+number:
+  - platform: template
+    id: n_gain
+    name: Głośność pipczyka
+    icon: mdi:volume-high
+    entity_category: config
+    unit_of_measurement: "%"
+    min_value: 5
+    max_value: 100
+    step: 5
+    optimistic: true
+    restore_value: true
+    initial_value: 60
+  - platform: template
+    id: n_gong_od
+    name: Gong od godziny
+    icon: mdi:bell-clock
+    entity_category: config
+    min_value: 0
+    max_value: 23
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 8
+  - platform: template
+    id: n_gong_do
+    name: Gong do godziny
+    icon: mdi:bell-clock-outline
+    entity_category: config
+    min_value: 1
+    max_value: 24
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 21
+  - platform: template
+    id: n_p_po
+    name: Przypomnienie po
+    icon: mdi:timer-alert-outline
+    entity_category: config
+    unit_of_measurement: min
+    min_value: 1
+    max_value: 240
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 5
+  - platform: template
+    id: n_p_co
+    name: Przypomnienie co
+    icon: mdi:timer-refresh-outline
+    entity_category: config
+    unit_of_measurement: min
+    min_value: 1
+    max_value: 120
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 5
+  - platform: template
+    id: n_kor_zgas
+    name: "Korytarz: zgaś po"
+    icon: mdi:timer-sand
+    entity_category: config
+    unit_of_measurement: s
+    min_value: 10
+    max_value: 3600
+    step: 10
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+  - platform: template
+    id: n_kor_okno
+    name: "Korytarz: okno widoczne"
+    icon: mdi:message-badge-outline
+    entity_category: config
+    unit_of_measurement: s
+    min_value: 3
+    max_value: 120
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 10
+  - platform: template
+    id: n_p_mrug
+    name: Przypomnienie mruganie
+    icon: mdi:flash-alert
+    entity_category: config
+    unit_of_measurement: s
+    min_value: 0
+    max_value: 60
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 5
+  - platform: template
+    id: n_p_czas
+    name: Przypomnienie wyświetlaj
+    icon: mdi:message-alert-outline
+    entity_category: config
+    unit_of_measurement: s
+    min_value: 0
+    max_value: 600
+    step: 5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 60
+  - platform: template
+    name: Jasność ekranu
+    icon: mdi:brightness-7
+    entity_category: config
+    unit_of_measurement: "%"
+    min_value: 5
+    max_value: 100
+    step: 5
+    update_interval: 5s
+    lambda: 'return id(p_bright);'
+    set_action:
+      - lambda: |-
+          id(p_bright) = (int) x;
+          if (!id(g_dimmed)) id(disp).set_backlight_brightness(x / 100.0f);
+  - platform: template
+    name: Jasność przyciemniona
+    icon: mdi:brightness-4
+    entity_category: config
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    update_interval: 5s
+    lambda: 'return id(p_dim);'
+    set_action:
+      - lambda: |-
+          id(p_dim) = (int) x;
+          if (id(g_dimmed)) id(disp).set_backlight_brightness(x / 100.0f);
+  - platform: template
+    name: Widoczna szerokość ekranu
+    icon: mdi:arrow-expand-horizontal
+    entity_category: config
+    unit_of_measurement: px
+    min_value: 400
+    max_value: 480
+    step: 2
+    mode: box
+    update_interval: 5s
+    lambda: 'return id(p_uiw);'
+    set_action:
+      - lambda: |-
+          id(p_uiw) = (int) x;
+          id(f_draw)();
+  - platform: template
+    name: Przyciemnienie po
+    icon: mdi:timer-outline
+    entity_category: config
+    unit_of_measurement: s
+    min_value: 10
+    max_value: 1800
+    step: 10
+    mode: box
+    update_interval: 5s
+    lambda: 'return id(p_dim_s);'
+    set_action:
+      - lambda: 'id(p_dim_s) = (int) x;'
+
+select:
+  - platform: template
+    id: sel_gong
+    name: Melodia gongu
+    icon: mdi:music-note
+    entity_category: config
+    options: ["Krótki", "Podwójny", "Kuranty", "Westminster"]
+    initial_option: "Podwójny"
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: sel_p_poz
+    name: Przypomnienie poziom
+    icon: mdi:alert-circle-outline
+    entity_category: config
+    options: ["Informacja", "Ostrzeżenie", "Alarm"]
+    initial_option: "Ostrzeżenie"
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: sel_p_dzw
+    name: Przypomnienie dźwięk
+    icon: mdi:bell-alert-outline
+    entity_category: config
+    options: ["Brak", "Krótki", "Podwójny", "Ostrzeżenie", "Alarm"]
+    initial_option: "Podwójny"
+    optimistic: true
+    restore_value: true
+
+text:
+  - platform: template
+    id: txt_p_enc
+    name: Przypomnienie encje
+    icon: mdi:lightbulb-alert-outline
+    entity_category: config
+    mode: text
+    max_length: 255
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+
+output:
+  - platform: ledc
+    id: buzzer_out
+    pin: 21
+
+rtttl:
+  id: buzzer
+  output: buzzer_out
+
+button:
+  - platform: template
+    name: Wgraj TFT
+    entity_category: config
+    on_press:
+      - lambda: 'id(disp).upload_tft();'
+  - platform: template
+    name: Synchronizuj z HA
+    on_press:
+      - script.execute:
+          id: ha_event
+          what: sync
+  - platform: template
+    name: Reset wyboru encji
+    entity_category: config
+    on_press:
+      - lambda: |-
+          for (int k = 0; k < 64; k++) id(p_sel)[k] = 0;
+          for (int k = 0; k < 32; k++) { id(p_mve)[k] = 0; id(p_mva)[k] = 0; }
+          ESP_LOGI("dom", "Selection reset");
+      - script.execute:
+          id: ha_event
+          what: sync
+  - platform: template
+    name: Test gongu
+    icon: mdi:bell-ring
+    entity_category: config
+    on_press:
+      - lambda: 'id(f_sound)(id(sel_gong).current_option().str());'
+  - platform: template
+    name: Test wiadomości
+    icon: mdi:message-text
+    entity_category: config
+    on_press:
+      - lambda: |-
+          id(m_title) = "Test wiadomości";
+          id(m_text) = "To jest przykładowa wiadomość z Home Assistant. Dotknij OK, aby zamknąć.";
+          id(m_lvl) = 0; id(m_btn2) = ""; id(m_id) = "test"; id(m_on) = true;
+          id(m_until) = 0; id(m_flash_until) = millis() + 3000; id(g_dimmed) = false; id(t_last) = millis();
+          id(f_sound)("Krótki");
+          id(f_draw)();
+  - platform: restart
+    name: Restart
+    entity_category: config

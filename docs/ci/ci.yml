@@ -1,0 +1,12 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: node --check dist/nspanel-dom-editor.js
+      - run: node tests/smoke.js
+      - run: pip install yamllint && yamllint -d "{extends: relaxed, rules: {line-length: disable}}" ha esphome/secrets.yaml.example

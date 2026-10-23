@@ -1,0 +1,814 @@
+# =====================================================================
+#  NSPanel Dom - pakiet Home Assistant  v1.9
+#  Plik: /config/packages/nspanel_dom_ha.yaml
+#  configuration.yaml:
+#    homeassistant:
+#      packages: !include_dir_named packages
+#
+#  Co robi:
+#   1. sensor.nspanel_dom_katalog - automatyczny przeglad pieter,
+#      pomieszczen i encji (light, switch, climate, cover, fan,
+#      media_player, lock, input_boolean, sensor, binary_sensor,
+#      scene, script) z flaga "sugerowana" dla oczywistych wyborow;
+#      encje bez pomieszczenia trafiaja do "Bez pomieszczenia"
+#   2. script.nspanel_dom_sync - wysyla katalog z aktualnymi stanami
+#      do panelu (akcje esphome.nspanel_dom_*)
+#   3. automatyzacje: synchronizacja (start panelu, zmiana katalogu,
+#      prosba z panelu) oraz przesylanie zmian stanow na zywo
+#   4. ekran glowny panelu (kafelek pogody z zegarem + W domu, Klimatyzacja,
+#      Moc z paskiem 0..moc_max, Na dachu); ekran sterowania klimatyzacja:
+#      konfiguracja w bloku EKRAN_GLOWNY ponizej; puste pole = HA
+#      sam zasugeruje encje (pogoda, temp. zewn., moc, energia dzis)
+#   6. uklad ekranu glownego z edytora (karta custom:nspanel-dom-editor-card):
+#      sensor.nspanel_dom_uklad (trwaly), script.nspanel_dom_zapisz_uklad,
+#      wysylka ukladu na panel i stany na zywo encji z kafelkow;
+#      bez zapisanego ukladu panel dostaje uklad domyslny z bloku EKRAN_GLOWNY
+#   7. wiadomosci na panelu: script.nspanel_dom_wiadomosc (okno z OK,
+#      poziom, dzwiek, mruganie, auto-zamkniecie, drugi przycisk);
+#      przypomnienie o zapalonym swietle (korytarz) - ustawienia to encje
+#      panelu (Urzadzenie NSPanel Dom > Konfiguracja: "Przypomnienie ...")
+#   8. swiatlo na korytarzu: po wlaczeniu pik + okno z opcja "Zgas za 60 s";
+#      wybrana -> odliczanie na panelu z Anuluj, potem wylaczenie; niewybrana
+#      -> okno znika. Ustawienia na panelu: "Korytarz: ..." (Konfiguracja)
+#   5. sensor.nspanel_dom_pogoda_info - skrot pogody (opady 3 h, wiatr,
+#      wilgotnosc) oraz prognoza 8 h i 5 dni dla karty prognozy na panelu
+#      (weather.get_forecasts hourly + daily); odswiezanie co 10 min
+#
+#  Wymaga: urzadzenie ESPHome o nazwie "nspanel-dom" z opcja
+#  "Allow the device to perform Home Assistant actions".
+#  Encja statusu panelu jest wykrywana automatycznie (urzadzenie
+#  ESPHome "NSPanel Dom", binary_sensor klasy connectivity) - nie
+#  zalezy od tego, jakie entity_id nadal jej HA.
+# =====================================================================
+
+template:
+  - trigger:
+      - trigger: homeassistant
+        event: start
+      - trigger: event
+        event_type: event_template_reloaded
+      - trigger: event
+        event_type: nspanel_dom_rescan
+      - trigger: event
+        event_type: area_registry_updated
+      - trigger: event
+        event_type: floor_registry_updated
+      - trigger: time_pattern
+        minutes: "/15"
+    action:
+      - variables:
+          # ---------------- EKRAN_GLOWNY: konfiguracja ----------------
+          # puste "" = automatyczna sugestia
+          ekran_glowny:
+            pogoda: weather.YOUR_WEATHER       # weather.* (tlo, opis, prognoza)
+            temp_zewn: ""                # puste = temperatura z encji pogody (zalecane); albo wlasny sensor
+            temp_dom: sensor.YOUR_INDOOR_TEMPERATURE
+            klima: climate.YOUR_CLIMATE          # climate.*; puste = automatyczne wyszukanie
+            moc: sensor.YOUR_POWER_W
+            moc_max: 2700                # W - pelna skala paska mocy (zielony 0 -> czerwony moc_max)
+            temp_dach: sensor.YOUR_OUTDOOR_TEMPERATURE   # kafelek "Na dachu" 
+          # encja statusu panelu: szukana po urzadzeniu, nie po nazwie
+          panel_status: >-
+            {%- set ns3 = namespace(s='') -%}
+            {%- for e in integration_entities('esphome') if e.startswith('binary_sensor.') and ns3.s == '' -%}
+              {%- set did = device_id(e) -%}
+              {%- set dn = (device_attr(did, 'name_by_user') or device_attr(did, 'name') or '') | string | lower | replace('-', ' ') | replace('_', ' ') if did else '' -%}
+              {%- if 'nspanel dom' in dn and state_attr(e, 'device_class') == 'connectivity' -%}{%- set ns3.s = e -%}{%- endif -%}
+            {%- endfor -%}
+            {{ ns3.s }}
+          glowny: >-
+            {%- set c = ekran_glowny -%}
+            {%- macro pick(dom, dcs, words) -%}
+              {%- set ns2 = namespace(r='') -%}
+              {%- for s in states[dom] if ns2.r == '' and (dcs == [] or (s.attributes.device_class | default('')) in dcs) and not is_hidden_entity(s.entity_id) -%}
+                {%- if words == [] or (words | select('in', s.entity_id | lower) | list | count > 0) -%}{%- set ns2.r = s.entity_id -%}{%- endif -%}
+              {%- endfor -%}{{ ns2.r }}
+            {%- endmacro -%}
+            {%- set pogoda = c.pogoda or pick('weather', [], []) -%}
+            {%- set tz = c.temp_zewn | default('', true) -%}
+            {%- set moc = c.moc or pick('sensor', ['power'], ['grid','total','suma','licznik','mains','siec','dom']) -%}
+            {%- set kl = c.klima or pick('climate', [], ['climate','hvac','ac']) or pick('climate', [], []) -%}
+            {{ {'pogoda': pogoda, 'temp_zewn': tz, 'temp_dom': c.temp_dom | default(''), 'klima': kl,
+                'moc': moc, 'moc_max': c.moc_max | default(2700), 'temp_dach': c.temp_dach | default('')} | to_json }}
+          kat: >-
+            {%- set ctrl = ['light','switch','climate','cover','fan','media_player','lock','input_boolean'] %}
+            {%- set doms = ctrl + ['sensor','binary_sensor','scene','script'] %}
+            {%- set s_sug = ['temperature','humidity','power','illuminance','carbon_dioxide','pm25'] %}
+            {%- set b_sug = ['door','window','opening','garage_door','motion','occupancy','presence'] %}
+            {%- set junk = ['rssi','linkquality','signal','last_seen','uptime','firmware','_update','_ip','ssid','restart','identify','heap','_wifi','_bssid','_mac','_version','nspanel_dom'] %}
+            {%- set ns = namespace(areas=[], ids=[], order=[]) %}
+            {%- for fl in floors() %}
+              {%- for a in floor_areas(fl) %}
+                {%- set ns.order = ns.order + [[a, floor_name(fl)]] %}
+              {%- endfor %}
+            {%- endfor %}
+            {%- set seen = ns.order | map('first') | list %}
+            {%- for a in areas() %}
+              {%- if a not in seen %}
+                {%- set ns.order = ns.order + [[a, '']] %}
+              {%- endif %}
+            {%- endfor %}
+            {%- for p in ns.order %}
+              {%- set an = area_name(p[0]) %}
+              {%- set it = namespace(l=[]) %}
+              {%- for e in area_entities(p[0]) %}
+                {%- set d = e.split('.')[0] %}
+                {%- set fn = state_attr(e, 'friendly_name') %}
+                {%- set dc = state_attr(e, 'device_class') | string %}
+                {%- set bad = junk | select('in', e | lower) | list | count > 0 %}
+                {%- if fn is not none and d in doms and not bad and not is_hidden_entity(e)
+                      and (d != 'sensor' or is_number(states(e)) or dc in s_sug) %}
+                  {%- set sg = 1 if (d in ctrl or (d == 'sensor' and dc in s_sug) or (d == 'binary_sensor' and dc in b_sug)) else 0 %}
+                  {%- set nm = (fn | string) | replace(an, '') | replace('|', '/') | trim %}
+                  {%- set nm = nm if nm | length > 1 else (fn | string | replace('|', '/')) %}
+                  {%- set it.l = it.l + [{'k': [1 - sg, doms.index(d) + 10, nm | lower] | join('_'), 'e': e, 'n': nm[:28], 's': sg}] %}
+                {%- endif %}
+              {%- endfor %}
+              {%- set lst = (it.l | sort(attribute='k'))[:40] %}
+              {%- if lst | count > 0 %}
+                {%- set ns.areas = ns.areas + [{'n': an, 'f': p[1], 'e': lst | map(attribute='e') | list, 'm': lst | map(attribute='n') | list, 's': lst | map(attribute='s') | list}] %}
+                {%- set ns.ids = ns.ids + (lst | map(attribute='e') | list) %}
+              {%- endif %}
+            {%- endfor %}
+            {%- set un = namespace(l=[]) %}
+            {%- for s in states | selectattr('domain', 'in', doms) %}
+              {%- set e = s.entity_id %}
+              {%- set dc = s.attributes.device_class | default('') | string %}
+              {%- set bad = junk | select('in', e | lower) | list | count > 0 %}
+              {%- if area_id(e) is none and not bad and not is_hidden_entity(e)
+                    and (s.domain != 'sensor' or is_number(s.state) or dc in s_sug) %}
+                {%- set nm = (s.name | string) | replace('|', '/') %}
+                {%- set un.l = un.l + [{'k': [doms.index(s.domain) + 10, nm | lower] | join('_'), 'e': e, 'n': nm[:28], 's': 0}] %}
+              {%- endif %}
+            {%- endfor %}
+            {%- set lst = (un.l | sort(attribute='k'))[:40] %}
+            {%- if lst | count > 0 %}
+              {%- set ns.areas = ns.areas + [{'n': 'Bez pomieszczenia', 'f': '', 'e': lst | map(attribute='e') | list, 'm': lst | map(attribute='n') | list, 's': lst | map(attribute='s') | list}] %}
+              {%- set ns.ids = ns.ids + (lst | map(attribute='e') | list) %}
+            {%- endif %}
+            {{ {'areas': ns.areas, 'ids': ns.ids} | to_json }}
+    sensor:
+      - name: NSPanel Dom Katalog
+        unique_id: nspanel_dom_katalog
+        icon: mdi:tablet-dashboard
+        unit_of_measurement: encji
+        state: "{{ kat.ids | count }}"
+        attributes:
+          areas: "{{ kat.areas }}"
+          ids: "{{ kat.ids }}"
+          glowny: "{{ glowny }}"
+          panel_status: "{{ panel_status }}"
+          panel_ents: >-
+            {%- set did = device_id(panel_status) if panel_status else none -%}
+            {{ device_entities(did) if did else [] }}
+          glowny_ids: >-
+            {{ ([glowny.pogoda, glowny.temp_zewn, glowny.klima, 'sun.sun', 'sensor.nspanel_dom_pogoda_info']
+                | select | list) | unique | list }}
+          uklad_domyslny: >-
+            {{ [
+              {'t': 'W', 'c': 0, 'r': 0, 'w': 10, 'h': 16},
+              {'t': 'V', 'c': 10, 'r': 0, 'w': 7, 'h': 8, 'e': glowny.temp_dom, 'l': 'W domu'},
+              {'t': 'K', 'c': 17, 'r': 0, 'w': 7, 'h': 8, 'e': glowny.klima, 'l': 'Klimatyzacja'},
+              {'t': 'B', 'c': 10, 'r': 8, 'w': 7, 'h': 8, 'e': glowny.moc, 'l': 'Moc', 'o1': 0, 'o2': glowny.moc_max},
+              {'t': 'V', 'c': 17, 'r': 8, 'w': 7, 'h': 8, 'e': glowny.temp_dach, 'l': 'Na dachu'}
+            ] }}
+
+  - trigger:
+      - trigger: homeassistant
+        event: start
+      - trigger: time_pattern
+        minutes: "/10"
+      - trigger: state
+        entity_id: sensor.nspanel_dom_katalog
+        attribute: glowny
+    action:
+      - variables:
+          w: "{{ (state_attr('sensor.nspanel_dom_katalog', 'glowny') or {}).get('pogoda', '') }}"
+      - condition: template
+        value_template: "{{ w != '' }}"
+      - action: weather.get_forecasts
+        target:
+          entity_id: "{{ w }}"
+        data:
+          type: hourly
+        response_variable: fc
+        continue_on_error: true
+      - action: weather.get_forecasts
+        target:
+          entity_id: "{{ w }}"
+        data:
+          type: daily
+        response_variable: fd
+        continue_on_error: true
+    sensor:
+      - name: NSPanel Dom Pogoda info
+        unique_id: nspanel_dom_pogoda_info
+        icon: mdi:weather-pouring
+        state: >-
+          {%- set f = (fc[w].forecast[:3] if fc is defined and fc is mapping and w in fc else []) -%}
+          {%- set f = f if f | count > 0 else (fd[w].forecast[:1] if fd is defined and fd is mapping and w in fd else []) -%}
+          {%- set pr = f | map(attribute='precipitation_probability') | select('number') | list -%}
+          {%- set am = f | map(attribute='precipitation') | select('number') | sum -%}
+          {%- set un = state_attr(w, 'precipitation_unit') or 'mm' if w else 'mm' -%}
+          {%- if pr | count > 0 and (pr | max) > 0 -%}Opady {{ pr | max | round(0) | int }}%{% if am > 0 %}, {{ am | round(1) }} {{ un }}{% endif %}
+          {%- elif am > 0 -%}Opady {{ am | round(1) }} {{ un }}
+          {%- elif f | count > 0 -%}Bez opadów
+          {%- else -%}-
+          {%- endif -%}
+        attributes:
+          linia2: >-
+            {%- set ws = state_attr(w, 'wind_speed') if w else none -%}
+            {%- set hu = state_attr(w, 'humidity') if w else none -%}
+            {%- set a = ('Wiatr ' ~ (ws | round(0) | int) ~ ' ' ~ (state_attr(w, 'wind_speed_unit') or 'km/h')) if ws is number else '' -%}
+            {%- set b = ('wilg. ' ~ (hu | round(0) | int) ~ '%') if hu is number else '' -%}
+            {{ [a, b] | select | join(', ') }}
+          godz: >-
+            {%- set f = (fc[w].forecast[:8] if fc is defined and fc is mapping and w in fc else []) -%}
+            {%- for x in f -%}
+            {{ as_local(as_datetime(x.datetime)).strftime('%H:%M') }}|{{ x.condition | default('', true) }}|
+            {{- (x.temperature | round(0) | int) if x.temperature is number else '' }}|
+            {{- (x.precipitation_probability | round(0) | int) if x.precipitation_probability is number else '' }}|
+            {{- (x.precipitation | round(1)) if x.precipitation is number and x.precipitation > 0 else '' }}{{ '\n' }}
+            {%- endfor -%}
+          dni: >-
+            {%- set f = (fd[w].forecast[:5] if fd is defined and fd is mapping and w in fd else []) -%}
+            {%- set dn = ['Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'So', 'Nd'] -%}
+            {%- for x in f -%}
+            {%- set d = as_local(as_datetime(x.datetime)) -%}
+            {%- set dd = (d.date() - now().date()).days -%}
+            {{ 'Dziś' if dd <= 0 else ('Jutro' if dd == 1 else dn[d.weekday()]) }}|{{ x.condition | default('', true) }}|
+            {{- (x.temperature | round(0) | int) if x.temperature is number else '' }}|
+            {{- (x.templow | round(0) | int) if x.templow is number else '' }}|
+            {{- (x.precipitation_probability | round(0) | int) if x.precipitation_probability is number else '' }}|
+            {{- (x.precipitation | round(1)) if x.precipitation is number and x.precipitation > 0 else '' }}{{ '\n' }}
+            {%- endfor -%}
+
+  - trigger:
+      - trigger: event
+        event_type: nspanel_dom_uklad_zapisz
+    sensor:
+      - name: NSPanel Dom Uklad
+        unique_id: nspanel_dom_uklad
+        icon: mdi:view-dashboard-edit
+        state: "{{ (trigger.event.data.uklad or []) | count }}"
+        attributes:
+          uklad: "{{ trigger.event.data.uklad or [] }}"
+          zapisano: "{{ now().isoformat() }}"
+
+script:
+  nspanel_dom_zapisz_uklad:
+    alias: NSPanel Dom - zapisz uklad
+    icon: mdi:content-save
+    mode: queued
+    max: 3
+    fields:
+      uklad:
+        description: Lista kafelkow z edytora (t, c, r, w, h, e, l, o1, o2); pusta lista = uklad domyslny
+        required: true
+    sequence:
+      - event: nspanel_dom_uklad_zapisz
+        event_data:
+          uklad: "{{ uklad }}"
+
+  nspanel_dom_wiadomosc:
+    alias: NSPanel Dom - wiadomosc na panelu
+    icon: mdi:message-alert
+    mode: queued
+    max: 5
+    fields:
+      tytul:
+        name: Tytuł
+        example: Kurier
+        selector:
+          text:
+      tresc:
+        name: Treść
+        required: true
+        example: Paczka czeka przy furtce.
+        selector:
+          text:
+            multiline: true
+      poziom:
+        name: Poziom
+        default: "0"
+        selector:
+          select:
+            options:
+              - label: Informacja
+                value: "0"
+              - label: Ostrzeżenie
+                value: "1"
+              - label: Alarm
+                value: "2"
+      dzwiek:
+        name: Dźwięk
+        default: Krótki
+        selector:
+          select:
+            options: [Brak, Krótki, Podwójny, Kuranty, Westminster, Ostrzeżenie, Alarm]
+      mruganie:
+        name: Mruganie ekranu (s)
+        default: 0
+        selector:
+          number:
+            min: 0
+            max: 60
+            unit_of_measurement: s
+      czas:
+        name: Zamknij po (s, 0 = do OK)
+        default: 0
+        selector:
+          number:
+            min: 0
+            max: 3600
+            unit_of_measurement: s
+      przycisk:
+        name: Drugi przycisk (puste = tylko OK)
+        example: Wyłącz
+        selector:
+          text:
+      ident:
+        name: Identyfikator (wraca w zdarzeniu esphome.nspanel_dom)
+        example: light.YOUR_HALLWAY_LIGHT
+        selector:
+          text:
+    sequence:
+      - action: esphome.nspanel_dom_wiadomosc
+        data:
+          tytul: "{{ tytul | default('Wiadomość') }}"
+          tresc: "{{ tresc | default('') }}"
+          poziom: "{{ poziom | default(0) | int(0) }}"
+          dzwiek: "{{ dzwiek | default('Krótki') }}"
+          mruganie: "{{ mruganie | default(0) | int(0) }}"
+          czas: "{{ czas | default(0) | int(0) }}"
+          przycisk: "{{ przycisk | default('') }}"
+          ident: "{{ ident | default('') }}"
+
+  nspanel_dom_odliczanie:
+    alias: NSPanel Dom - odliczanie do zgaszenia
+    icon: mdi:timer-sand
+    mode: restart
+    fields:
+      encja:
+        name: Encja
+        required: true
+        selector:
+          entity:
+      sekundy:
+        name: Sekundy
+        default: 60
+        selector:
+          number:
+            min: 5
+            max: 3600
+    sequence:
+      - variables:
+          sek: "{{ sekundy | default(60) | int(60) }}"
+          nazwa: "{{ state_attr(encja, 'friendly_name') or encja }}"
+      - action: script.nspanel_dom_wiadomosc
+        data:
+          tytul: "{{ nazwa }}"
+          tresc: "Światło zgaśnie za {s} s."
+          poziom: "1"
+          dzwiek: Brak
+          czas: "{{ sek }}"
+          przycisk: Anuluj
+          ident: "anuluj:{{ encja }}"
+      - wait_template: "{{ not is_state(encja, 'on') }}"
+        timeout:
+          seconds: "{{ sek }}"
+        continue_on_timeout: true
+      - if:
+          - condition: template
+            value_template: "{{ is_state(encja, 'on') }}"
+        then:
+          - action: homeassistant.turn_off
+            target:
+              entity_id: "{{ encja }}"
+      - action: esphome.nspanel_dom_wiadomosc_zamknij
+        data:
+          ident: "anuluj:{{ encja }}"
+
+  nspanel_dom_uklad_wyslij:
+    alias: NSPanel Dom - wyslij uklad
+    icon: mdi:send
+    mode: restart
+    sequence:
+      - variables:
+          g: "{{ state_attr('sensor.nspanel_dom_katalog', 'glowny') or {} }}"
+          u: >-
+            {%- set u = state_attr('sensor.nspanel_dom_uklad', 'uklad') -%}
+            {{ u if u else (state_attr('sensor.nspanel_dom_katalog', 'uklad_domyslny') or []) }}
+      - action: esphome.nspanel_dom_uklad
+        data:
+          lines: >-
+            {%- for t in u -%}
+            {%- set e = t.e | default('', true) -%}
+            {%- set e = e if e else (g.klima | default('') if t.t == 'K' else '') -%}
+            {%- set d = e.split('.')[0] if e else '' -%}
+            {%- set lbl = t.l | default('', true) or (state_attr(e, 'friendly_name') if e else '') or '' -%}
+            {%- set ex -%}
+              {%- if d == 'light' -%}{{ ((state_attr(e, 'brightness') | int(0)) * 100 / 255) | round(0) | int }}
+              {%- elif d in ['sensor', 'number', 'input_number'] -%}{{ state_attr(e, 'unit_of_measurement') | default('', true) }}
+              {%- elif d == 'binary_sensor' -%}{{ state_attr(e, 'device_class') | default('', true) }}
+              {%- endif -%}
+            {%- endset -%}
+            {{ t.t }}|{{ t.c }}|{{ t.r }}|{{ t.w }}|{{ t.h }}|{{ e }}|{{ lbl | string | replace('|', '/') }}|{{ t.o1 | default('', true) }}|{{ t.o2 | default('', true) }}|{{ states(e) if e else '' }}|{{ ex | trim }}{{ '\n' }}
+            {%- endfor -%}
+
+  nspanel_dom_sync:
+    alias: NSPanel Dom - synchronizacja katalogu
+    icon: mdi:sync
+    mode: restart
+    sequence:
+      - variables:
+          areas: "{{ state_attr('sensor.nspanel_dom_katalog', 'areas') or [] }}"
+      - action: esphome.nspanel_dom_begin
+        data:
+          count: "{{ areas | count }}"
+      - repeat:
+          for_each: "{{ areas }}"
+          sequence:
+            - action: esphome.nspanel_dom_area
+              data:
+                idx: "{{ repeat.index - 1 }}"
+                name: "{{ repeat.item.n }}"
+                floor: "{{ repeat.item.f }}"
+                items: >-
+                  {%- set it = repeat.item -%}
+                  {%- for e in it.e -%}
+                  {%- set d = e.split('.')[0] -%}
+                  {{ e }}|{{ it.m[loop.index0] }}|{{ it.s[loop.index0] }}|{{ states(e) }}|
+                  {%- if d == 'light' -%}{{ ((state_attr(e, 'brightness') | int(0)) * 100 / 255) | round(0) | int }}
+                  {%- elif d == 'climate' -%}{{ state_attr(e, 'current_temperature') | default('', true) }}/{{ state_attr(e, 'temperature') | default('', true) }}/{{ state_attr(e, 'hvac_action') | default('', true) }}
+                  {%- elif d == 'cover' -%}{{ state_attr(e, 'current_position') | default('', true) }}
+                  {%- elif d == 'sensor' -%}{{ state_attr(e, 'unit_of_measurement') | default('', true) }}
+                  {%- elif d == 'binary_sensor' -%}{{ state_attr(e, 'device_class') | default('', true) }}
+                  {%- endif -%}
+                  {{ '\n' }}
+                  {%- endfor -%}
+      - action: esphome.nspanel_dom_done
+      - action: script.nspanel_dom_uklad_wyslij
+      - action: script.nspanel_dom_glowny
+      - action: script.nspanel_dom_prognoza
+
+  nspanel_dom_prognoza:
+    alias: NSPanel Dom - prognoza
+    icon: mdi:weather-cloudy-clock
+    mode: queued
+    max: 2
+    sequence:
+      - action: esphome.nspanel_dom_forecast
+        data:
+          godz: "{{ state_attr('sensor.nspanel_dom_pogoda_info', 'godz') | default('', true) }}"
+          dni: "{{ state_attr('sensor.nspanel_dom_pogoda_info', 'dni') | default('', true) }}"
+
+  nspanel_dom_glowny:
+    alias: NSPanel Dom - ekran glowny
+    icon: mdi:weather-partly-cloudy
+    mode: queued
+    max: 3
+    sequence:
+      - variables:
+          g: "{{ state_attr('sensor.nspanel_dom_katalog', 'glowny') or {} }}"
+      - condition: template
+        value_template: "{{ g | count > 0 }}"
+      - variables:
+          kl: >-
+            {%- set u = state_attr('sensor.nspanel_dom_uklad', 'uklad') or [] -%}
+            {%- set k = u | selectattr('t', 'eq', 'K') | map(attribute='e') | select | list -%}
+            {{ k[0] if k | count > 0 else (g.klima | default('')) }}
+      - action: esphome.nspanel_dom_overview
+        data:
+          wx: "{{ states(g.pogoda) if g.pogoda else '' }}"
+          elev: "{{ state_attr('sun.sun', 'elevation') | float(30) }}"
+          tout: >-
+            {#- temperatura kafelka pogody: z encji pogody; wlasny czujnik tylko gdy jest inny niz "Na dachu" -#}
+            {%- set tz = g.temp_zewn | default('', true) -%}
+            {%- if tz and tz != g.temp_dach and true and is_number(states(tz)) -%}{{ states(tz) }}
+            {%- elif g.pogoda -%}{{ state_attr(g.pogoda, 'temperature') | default('', true) }}
+            {%- endif -%}
+          wi1: >-
+            {%- set v = states('sensor.nspanel_dom_pogoda_info') -%}
+            {{ '' if v in ['unknown', 'unavailable', '-'] else v }}
+          wi2: "{{ state_attr('sensor.nspanel_dom_pogoda_info', 'linia2') | default('', true) }}"
+      - if:
+          - condition: template
+            value_template: "{{ (kl | default('')) != '' and states(kl) not in ['unknown', 'unavailable'] }}"
+        then:
+          - action: esphome.nspanel_dom_klima
+            data:
+              kid: "{{ kl }}"
+              st: "{{ states(kl) }}"
+              cur: "{{ state_attr(kl, 'current_temperature') | default('', true) }}"
+              tgt: "{{ state_attr(kl, 'temperature') | default('', true) }}"
+              step: "{{ state_attr(kl, 'target_temp_step') | default(1, true) }}"
+              fan: "{{ state_attr(kl, 'fan_mode') | default('', true) }}"
+              swing: "{{ state_attr(kl, 'swing_mode') | default('', true) }}"
+              preset: "{{ state_attr(kl, 'preset_mode') | default('', true) }}"
+              hm: "{{ (state_attr(kl, 'hvac_modes') or []) | join(',') }}"
+              fm: "{{ (state_attr(kl, 'fan_modes') or []) | join(',') }}"
+              sm: "{{ (state_attr(kl, 'swing_modes') or []) | join(',') }}"
+              pm: "{{ (state_attr(kl, 'preset_modes') or []) | join(',') }}"
+              tmin: "{{ state_attr(kl, 'min_temp') | default('', true) }}"
+              tmax: "{{ state_attr(kl, 'max_temp') | default('', true) }}"
+
+automation:
+  - id: nspanel_dom_synchronizacja
+    alias: NSPanel Dom - synchronizacja
+    mode: restart
+    triggers:
+      - trigger: event
+        event_type: esphome.nspanel_dom
+        id: panel
+      - trigger: state
+        entity_id: sensor.nspanel_dom_katalog
+        attribute: areas
+        id: katalog
+      - trigger: state
+        entity_id: sensor.nspanel_dom_katalog
+        attribute: glowny
+        id: katalog
+    actions:
+      - if:
+          - condition: template
+            value_template: "{{ trigger.id == 'panel' and trigger.event.data.what == 'rescan' }}"
+        then:
+          - event: nspanel_dom_rescan
+          - delay: "00:00:03"
+      - condition: template
+        value_template: >-
+          {%- set p = state_attr('sensor.nspanel_dom_katalog', 'panel_status') -%}
+          {{ not p or is_state(p, 'on') }}
+      - action: script.nspanel_dom_sync
+
+  - id: nspanel_dom_glowny_na_zywo
+    alias: NSPanel Dom - ekran glowny na zywo
+    description: Maksymalnie jedna wysylka na 2 s, zawsze najnowsze wartosci.
+    mode: single
+    max_exceeded: silent
+    triggers:
+      - trigger: event
+        event_type: state_changed
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ trigger.event.data.new_state is not none
+             and (trigger.event.data.entity_id in (state_attr('sensor.nspanel_dom_katalog', 'glowny_ids') or [])
+                  or trigger.event.data.entity_id in ((state_attr('sensor.nspanel_dom_uklad', 'uklad') or [])
+                     | selectattr('t', 'eq', 'K') | map(attribute='e') | select('string') | list))
+             and ((state_attr('sensor.nspanel_dom_katalog', 'panel_status') or '') == ''
+                  or is_state(state_attr('sensor.nspanel_dom_katalog', 'panel_status'), 'on')) }}
+    actions:
+      - delay: "00:00:02"
+      - action: script.nspanel_dom_glowny
+
+  - id: nspanel_dom_uklad_auto
+    alias: NSPanel Dom - uklad na panel
+    mode: restart
+    triggers:
+      - trigger: state
+        entity_id: sensor.nspanel_dom_uklad
+    conditions:
+      - condition: template
+        value_template: >-
+          {%- set p = state_attr('sensor.nspanel_dom_katalog', 'panel_status') -%}
+          {{ not p or is_state(p, 'on') }}
+    actions:
+      - action: script.nspanel_dom_uklad_wyslij
+      - action: script.nspanel_dom_glowny
+
+  - id: nspanel_dom_przypomnienie_swiatlo
+    alias: NSPanel Dom - przypomnienie o zapalonym swietle
+    description: >-
+      Ustawienia na panelu (Konfiguracja): Przypomnienie o swietle, Przypomnienie encje
+      (puste = swiatla z obszaru/nazwy "korytarz"), po, co, poziom, dzwiek, mruganie, wyswietlaj.
+    mode: single
+    max_exceeded: silent
+    triggers:
+      - trigger: time_pattern
+        minutes: "/1"
+    variables:
+      cfg: >-
+        {%- set pe = state_attr('sensor.nspanel_dom_katalog', 'panel_ents') or [] -%}
+        {%- macro v(suf, d) -%}
+          {%- set e = pe | select('match', '.*_' ~ suf ~ '$') | first | default('') -%}
+          {{- states(e) if e and states(e) not in ['unknown', 'unavailable', ''] else d -}}
+        {%- endmacro -%}
+        {%- set lv = {'Informacja': 0, 'Ostrzeżenie': 1, 'Alarm': 2} -%}
+        {{ {'wl': v('przypomnienie_o_swietle', 'on'), 'enc': v('przypomnienie_encje', ''),
+            'po': v('przypomnienie_po', 5) | float(5) | int, 'co': [v('przypomnienie_co', 5) | float(5) | int, 1] | max,
+            'poz': lv.get(v('przypomnienie_poziom', 'Ostrzeżenie'), 1), 'dzw': v('przypomnienie_dzwiek', 'Podwójny'),
+            'mrug': v('przypomnienie_mruganie', 5) | float(5) | int, 'czas': v('przypomnienie_wyswietlaj', 60) | float(60) | int} | to_json }}
+      swiatla: >-
+        {%- set enc = cfg.enc | string | trim -%}
+        {%- if enc -%}
+          {{ enc.split(',') | map('trim') | select | list }}
+        {%- else -%}
+          {%- set ns = namespace(l=[]) -%}
+          {%- for a in areas() if 'korytarz' in (area_name(a) | lower) -%}
+            {%- set ns.l = ns.l + (area_entities(a) | select('match', 'light\\.') | list) -%}
+          {%- endfor -%}
+          {{ (ns.l + (states.light | map(attribute='entity_id') | select('search', 'korytarz') | list)) | unique | list }}
+        {%- endif -%}
+    conditions:
+      - condition: template
+        value_template: >-
+          {%- set p = state_attr('sensor.nspanel_dom_katalog', 'panel_status') -%}
+          {{ cfg.wl == 'on' and swiatla | count > 0 and (not p or is_state(p, 'on')) }}
+    actions:
+      - repeat:
+          for_each: "{{ swiatla }}"
+          sequence:
+            - variables:
+                e: "{{ repeat.item }}"
+                m: >-
+                  {%- set s = expand(e) | first -%}
+                  {{ ((now() - s.last_changed).total_seconds() // 60) | int if s is defined and s.state == 'on' else -1 }}
+            - condition: template
+              value_template: "{{ m >= cfg.po and (m - cfg.po) % cfg.co == 0 }}"
+            - action: script.nspanel_dom_wiadomosc
+              data:
+                tytul: Światło się pali
+                tresc: "{{ state_attr(e, 'friendly_name') or e }} świeci od {{ m }} min."
+                poziom: "{{ cfg.poz }}"
+                dzwiek: "{{ cfg.dzw }}"
+                mruganie: "{{ cfg.mrug }}"
+                czas: "{{ cfg.czas }}"
+                przycisk: Wyłącz
+                ident: "{{ e }}"
+
+  - id: nspanel_dom_wiadomosc_przycisk
+    alias: NSPanel Dom - drugi przycisk wiadomosci
+    description: Przycisk "Wyłącz" w oknie wiadomosci wylacza encje podana jako identyfikator.
+    mode: queued
+    triggers:
+      - trigger: event
+        event_type: esphome.nspanel_dom
+        event_data:
+          what: przycisk
+    conditions:
+      - condition: template
+        value_template: "{{ '.' in (trigger.event.data.ident | default('')) and ':' not in (trigger.event.data.ident | default('')) }}"
+    actions:
+      - action: homeassistant.turn_off
+        target:
+          entity_id: "{{ trigger.event.data.ident }}"
+
+  - id: nspanel_dom_korytarz_okno
+    alias: NSPanel Dom - korytarz okno po wlaczeniu
+    description: >-
+      Po wlaczeniu swiatla na korytarzu: pik i okno z opcja zgaszenia za N s.
+      Ustawienia na panelu: "Korytarz: okno po wlaczeniu", "Korytarz: zgas po", "Korytarz: okno widoczne";
+      lista swiatel jak w przypomnieniu ("Przypomnienie encje", puste = korytarz).
+    mode: queued
+    max: 5
+    max_exceeded: silent
+    triggers:
+      - trigger: event
+        event_type: state_changed
+    variables:
+      e: "{{ trigger.event.data.entity_id }}"
+      cfg: >-
+        {%- set pe = state_attr('sensor.nspanel_dom_katalog', 'panel_ents') or [] -%}
+        {%- macro v(suf, d) -%}
+          {%- set x = pe | select('match', '.*_' ~ suf ~ '$') | first | default('') -%}
+          {{- states(x) if x and states(x) not in ['unknown', 'unavailable', ''] else d -}}
+        {%- endmacro -%}
+        {{ {'wl': v('korytarz_okno_po_wlaczeniu', 'on'), 'enc': v('przypomnienie_encje', ''),
+            'zgas': v('korytarz_zgas_po', 60) | float(60) | int, 'okno': v('korytarz_okno_widoczne', 10) | float(10) | int} | to_json }}
+    conditions:
+      - condition: template
+        value_template: >-
+          {%- set n = trigger.event.data.new_state -%}
+          {%- set o = trigger.event.data.old_state -%}
+          {{ e.startswith('light.') and n is not none and o is not none and n.state != o.state
+             and n.state in ['on', 'off'] }}
+      - condition: template
+        value_template: >-
+          {%- set enc = cfg.enc | string | trim -%}
+          {%- if enc -%}
+            {%- set lista = enc.split(',') | map('trim') | select | list -%}
+          {%- else -%}
+            {%- set ns = namespace(l=[]) -%}
+            {%- for a in areas() if 'korytarz' in (area_name(a) | lower) -%}
+              {%- set ns.l = ns.l + (area_entities(a) | select('match', 'light\\.') | list) -%}
+            {%- endfor -%}
+            {%- set lista = ns.l + (states.light | map(attribute='entity_id') | select('search', 'korytarz') | list) -%}
+          {%- endif -%}
+          {%- set p = state_attr('sensor.nspanel_dom_katalog', 'panel_status') -%}
+          {{ e in lista and (not p or is_state(p, 'on')) }}
+    actions:
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ trigger.event.data.new_state.state == 'on' and cfg.wl == 'on' }}"
+            sequence:
+              - action: script.nspanel_dom_wiadomosc
+                data:
+                  tytul: "{{ state_attr(e, 'friendly_name') or e }}"
+                  tresc: Światło włączone.
+                  poziom: "0"
+                  dzwiek: Krótki
+                  czas: "{{ cfg.okno }}"
+                  przycisk: "Zgaś za {{ cfg.zgas }} s"
+                  ident: "odlicz:{{ e }}"
+          - conditions:
+              - condition: template
+                value_template: "{{ trigger.event.data.new_state.state == 'off' }}"
+            sequence:
+              - action: esphome.nspanel_dom_wiadomosc_zamknij
+                data:
+                  ident: "odlicz:{{ e }}"
+              - action: esphome.nspanel_dom_wiadomosc_zamknij
+                data:
+                  ident: "anuluj:{{ e }}"
+              - action: script.turn_off
+                target:
+                  entity_id: script.nspanel_dom_odliczanie
+
+  - id: nspanel_dom_korytarz_przyciski
+    alias: NSPanel Dom - korytarz odliczanie i anuluj
+    mode: queued
+    triggers:
+      - trigger: event
+        event_type: esphome.nspanel_dom
+        event_data:
+          what: przycisk
+    variables:
+      ident: "{{ trigger.event.data.ident | default('') }}"
+      zgas: >-
+        {%- set pe = state_attr('sensor.nspanel_dom_katalog', 'panel_ents') or [] -%}
+        {%- set x = pe | select('match', '.*_korytarz_zgas_po$') | first | default('') -%}
+        {{ (states(x) | float(60) | int) if x else 60 }}
+    conditions:
+      - condition: template
+        value_template: "{{ ident.startswith('odlicz:') or ident.startswith('anuluj:') }}"
+    actions:
+      - if:
+          - condition: template
+            value_template: "{{ ident.startswith('odlicz:') }}"
+        then:
+          - action: script.turn_on
+            target:
+              entity_id: script.nspanel_dom_odliczanie
+            data:
+              variables:
+                encja: "{{ ident[7:] }}"
+                sekundy: "{{ zgas }}"
+        else:
+          - action: script.turn_off
+            target:
+              entity_id: script.nspanel_dom_odliczanie
+
+  - id: nspanel_dom_prognoza_auto
+    alias: NSPanel Dom - prognoza na panel
+    mode: queued
+    max: 2
+    triggers:
+      - trigger: state
+        entity_id: sensor.nspanel_dom_pogoda_info
+    conditions:
+      - condition: template
+        value_template: >-
+          {%- set p = state_attr('sensor.nspanel_dom_katalog', 'panel_status') -%}
+          {{ not p or is_state(p, 'on') }}
+    actions:
+      - action: script.nspanel_dom_prognoza
+
+  - id: nspanel_dom_stany
+    alias: NSPanel Dom - stany na zywo
+    mode: queued
+    max: 50
+    max_exceeded: silent
+    triggers:
+      - trigger: event
+        event_type: state_changed
+    conditions:
+      - condition: template
+        value_template: >-
+          {%- set e = trigger.event.data.entity_id -%}
+          {%- set n = trigger.event.data.new_state -%}
+          {%- set o = trigger.event.data.old_state -%}
+          {{ n is not none
+             and (e in (state_attr('sensor.nspanel_dom_katalog', 'ids') or [])
+                  or e in ((state_attr('sensor.nspanel_dom_uklad', 'uklad') or state_attr('sensor.nspanel_dom_katalog', 'uklad_domyslny') or [])
+                           | map(attribute='e') | select('string') | list))
+             and (o is none or o.state != n.state or e.split('.')[0] in ['light', 'climate', 'cover'])
+             and ((state_attr('sensor.nspanel_dom_katalog', 'panel_status') or '') == ''
+                  or is_state(state_attr('sensor.nspanel_dom_katalog', 'panel_status'), 'on')) }}
+    actions:
+      - variables:
+          e: "{{ trigger.event.data.entity_id }}"
+          d: "{{ e.split('.')[0] }}"
+      - action: esphome.nspanel_dom_state
+        data:
+          eid: "{{ e }}"
+          st: "{{ states(e) }}"
+          ex: >-
+            {%- if d == 'light' -%}{{ ((state_attr(e, 'brightness') | int(0)) * 100 / 255) | round(0) | int }}
+            {%- elif d == 'climate' -%}{{ state_attr(e, 'current_temperature') | default('', true) }}/{{ state_attr(e, 'temperature') | default('', true) }}/{{ state_attr(e, 'hvac_action') | default('', true) }}
+            {%- elif d == 'cover' -%}{{ state_attr(e, 'current_position') | default('', true) }}
+            {%- elif d == 'sensor' -%}{{ state_attr(e, 'unit_of_measurement') | default('', true) }}
+            {%- elif d == 'binary_sensor' -%}{{ state_attr(e, 'device_class') | default('', true) }}
+            {%- endif -%}
