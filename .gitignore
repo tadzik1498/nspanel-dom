@@ -1,3 +1,11 @@
 secrets.yaml
 *.bak
 .esphome/
+*secrets*.yaml
+!secrets.yaml.example
+*secrets*.txt
+*.pem
+*.key
+.env
+.storage/
+known_devices.yaml
