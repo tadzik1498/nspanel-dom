@@ -1,45 +1,39 @@
 # =====================================================================
-#  NSPanel Dom - pakiet Home Assistant  v1.9
-#  Plik: /config/packages/nspanel_dom_ha.yaml
+#  NSPanel Dom - Home Assistant package  v1.9
+#  File: /config/packages/nspanel_dom_ha.yaml
 #  configuration.yaml:
 #    homeassistant:
 #      packages: !include_dir_named packages
 #
-#  Co robi:
-#   1. sensor.nspanel_dom_katalog - automatyczny przeglad pieter,
-#      pomieszczen i encji (light, switch, climate, cover, fan,
-#      media_player, lock, input_boolean, sensor, binary_sensor,
-#      scene, script) z flaga "sugerowana" dla oczywistych wyborow;
-#      encje bez pomieszczenia trafiaja do "Bez pomieszczenia"
-#   2. script.nspanel_dom_sync - wysyla katalog z aktualnymi stanami
-#      do panelu (akcje esphome.nspanel_dom_*)
-#   3. automatyzacje: synchronizacja (start panelu, zmiana katalogu,
-#      prosba z panelu) oraz przesylanie zmian stanow na zywo
-#   4. ekran glowny panelu (kafelek pogody z zegarem + W domu, Klimatyzacja,
-#      Moc z paskiem 0..moc_max, Na dachu); ekran sterowania klimatyzacja:
-#      konfiguracja w bloku EKRAN_GLOWNY ponizej; puste pole = HA
-#      sam zasugeruje encje (pogoda, temp. zewn., moc, energia dzis)
-#   6. uklad ekranu glownego z edytora (karta custom:nspanel-dom-editor-card):
-#      sensor.nspanel_dom_uklad (trwaly), script.nspanel_dom_zapisz_uklad,
-#      wysylka ukladu na panel i stany na zywo encji z kafelkow;
-#      bez zapisanego ukladu panel dostaje uklad domyslny z bloku EKRAN_GLOWNY
-#   7. wiadomosci na panelu: script.nspanel_dom_wiadomosc (okno z OK,
-#      poziom, dzwiek, mruganie, auto-zamkniecie, drugi przycisk);
-#      przypomnienie o zapalonym swietle (korytarz) - ustawienia to encje
-#      panelu (Urzadzenie NSPanel Dom > Konfiguracja: "Przypomnienie ...")
-#   8. swiatlo na korytarzu: po wlaczeniu pik + okno z opcja "Zgas za 60 s";
-#      wybrana -> odliczanie na panelu z Anuluj, potem wylaczenie; niewybrana
-#      -> okno znika. Ustawienia na panelu: "Korytarz: ..." (Konfiguracja)
-#   5. sensor.nspanel_dom_pogoda_info - skrot pogody (opady 3 h, wiatr,
-#      wilgotnosc) oraz prognoza 8 h i 5 dni dla karty prognozy na panelu
-#      (weather.get_forecasts hourly + daily); odswiezanie co 10 min
+#  What it does:
+#   1. sensor.nspanel_dom_katalog - automatic survey of floors, areas and entities
+#      (light, switch, climate, cover, fan, media_player, lock, input_boolean, sensor,
+#      binary_sensor, scene, script) with a "suggested" flag for obvious picks;
+#      entities without an area go to "No area"
+#   2. script.nspanel_dom_sync - pushes the catalog with current states to the panel
+#   3. automations: sync (panel start, catalog change, panel request) and live state updates
+#   4. home screen config block EKRAN_GLOWNY below (weather+clock, indoor, climate, power
+#      bar 0..moc_max, roof); empty field = HA suggests an entity
+#   5. sensor.nspanel_dom_pogoda_info - weather digest (3 h precipitation, wind, humidity)
+#      and 8 h / 5 day forecast for the panel's forecast screen (refreshed every 10 min)
+#   6. layout from the editor card (custom:nspanel-dom-editor-card): sensor.nspanel_dom_uklad
+#      (persistent), script.nspanel_dom_zapisz_uklad, push to the panel, live tile states
+#   7. messages on the panel: script.nspanel_dom_wiadomosc (OK window, level, sound, blink,
+#      auto-close, second button); "light left on" reminder - settings are panel entities
+#   8. hallway light: on switch-on a beep + window "Turn off in 60 s"; if chosen, countdown
+#      with Cancel, then switch off; if ignored the window disappears
 #
-#  Wymaga: urzadzenie ESPHome o nazwie "nspanel-dom" z opcja
-#  "Allow the device to perform Home Assistant actions".
-#  Encja statusu panelu jest wykrywana automatycznie (urzadzenie
-#  ESPHome "NSPanel Dom", binary_sensor klasy connectivity) - nie
-#  zalezy od tego, jakie entity_id nadal jej HA.
+#  Language of generated texts: input_select.nspanel_dom_language (pl / en).
+#  Requires: an ESPHome device named "nspanel-dom" with "Allow the device to perform
+#  Home Assistant actions" enabled. The panel status entity is detected automatically.
 # =====================================================================
+
+input_select:
+  nspanel_dom_language:
+    name: NSPanel Dom language
+    options: [pl, en]
+    initial: en
+    icon: mdi:translate
 
 template:
   - trigger:
@@ -210,17 +204,17 @@ template:
           {%- set pr = f | map(attribute='precipitation_probability') | select('number') | list -%}
           {%- set am = f | map(attribute='precipitation') | select('number') | sum -%}
           {%- set un = state_attr(w, 'precipitation_unit') or 'mm' if w else 'mm' -%}
-          {%- if pr | count > 0 and (pr | max) > 0 -%}Opady {{ pr | max | round(0) | int }}%{% if am > 0 %}, {{ am | round(1) }} {{ un }}{% endif %}
-          {%- elif am > 0 -%}Opady {{ am | round(1) }} {{ un }}
-          {%- elif f | count > 0 -%}Bez opadów
+          {%- if pr | count > 0 and (pr | max) > 0 -%}{{ 'Precip.' if is_state('input_select.nspanel_dom_language', 'en') else 'Opady' }} {{ pr | max | round(0) | int }}%{% if am > 0 %}, {{ am | round(1) }} {{ un }}{% endif %}
+          {%- elif am > 0 -%}{{ 'Precip.' if is_state('input_select.nspanel_dom_language', 'en') else 'Opady' }} {{ am | round(1) }} {{ un }}
+          {%- elif f | count > 0 -%}{{ 'No precipitation' if is_state('input_select.nspanel_dom_language', 'en') else 'Bez opadów' }}
           {%- else -%}-
           {%- endif -%}
         attributes:
           linia2: >-
             {%- set ws = state_attr(w, 'wind_speed') if w else none -%}
             {%- set hu = state_attr(w, 'humidity') if w else none -%}
-            {%- set a = ('Wiatr ' ~ (ws | round(0) | int) ~ ' ' ~ (state_attr(w, 'wind_speed_unit') or 'km/h')) if ws is number else '' -%}
-            {%- set b = ('wilg. ' ~ (hu | round(0) | int) ~ '%') if hu is number else '' -%}
+            {%- set a = (('Wind ' if is_state('input_select.nspanel_dom_language', 'en') else 'Wiatr ') ~ (ws | round(0) | int) ~ ' ' ~ (state_attr(w, 'wind_speed_unit') or 'km/h')) if ws is number else '' -%}
+            {%- set b = (('humidity ' if is_state('input_select.nspanel_dom_language', 'en') else 'wilg. ') ~ (hu | round(0) | int) ~ '%') if hu is number else '' -%}
             {{ [a, b] | select | join(', ') }}
           godz: >-
             {%- set f = (fc[w].forecast[:8] if fc is defined and fc is mapping and w in fc else []) -%}
@@ -232,11 +226,11 @@ template:
             {%- endfor -%}
           dni: >-
             {%- set f = (fd[w].forecast[:5] if fd is defined and fd is mapping and w in fd else []) -%}
-            {%- set dn = ['Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'So', 'Nd'] -%}
+            {%- set dn = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] if is_state('input_select.nspanel_dom_language', 'en') else ['Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'So', 'Nd'] -%}
             {%- for x in f -%}
             {%- set d = as_local(as_datetime(x.datetime)) -%}
             {%- set dd = (d.date() - now().date()).days -%}
-            {{ 'Dziś' if dd <= 0 else ('Jutro' if dd == 1 else dn[d.weekday()]) }}|{{ x.condition | default('', true) }}|
+            {{ ('Today' if is_state('input_select.nspanel_dom_language', 'en') else 'Dziś') if dd <= 0 else (('Tomorrow' if is_state('input_select.nspanel_dom_language', 'en') else 'Jutro') if dd == 1 else dn[d.weekday()]) }}|{{ x.condition | default('', true) }}|
             {{- (x.temperature | round(0) | int) if x.temperature is number else '' }}|
             {{- (x.templow | round(0) | int) if x.templow is number else '' }}|
             {{- (x.precipitation_probability | round(0) | int) if x.precipitation_probability is number else '' }}|
@@ -257,13 +251,13 @@ template:
 
 script:
   nspanel_dom_zapisz_uklad:
-    alias: NSPanel Dom - zapisz uklad
+    alias: NSPanel Dom - save layout
     icon: mdi:content-save
     mode: queued
     max: 3
     fields:
       uklad:
-        description: Lista kafelkow z edytora (t, c, r, w, h, e, l, o1, o2); pusta lista = uklad domyslny
+        description: Tile list from the editor (t, c, r, w, h, e, l, o1, o2); empty list = default layout
         required: true
     sequence:
       - event: nspanel_dom_uklad_zapisz
@@ -271,25 +265,25 @@ script:
           uklad: "{{ uklad }}"
 
   nspanel_dom_wiadomosc:
-    alias: NSPanel Dom - wiadomosc na panelu
+    alias: NSPanel Dom - message on panel
     icon: mdi:message-alert
     mode: queued
     max: 5
     fields:
       tytul:
-        name: Tytuł
+        name: Title
         example: Kurier
         selector:
           text:
       tresc:
-        name: Treść
+        name: Text
         required: true
         example: Paczka czeka przy furtce.
         selector:
           text:
             multiline: true
       poziom:
-        name: Poziom
+        name: Level
         default: "0"
         selector:
           select:
@@ -301,13 +295,13 @@ script:
               - label: Alarm
                 value: "2"
       dzwiek:
-        name: Dźwięk
+        name: Sound
         default: Krótki
         selector:
           select:
             options: [Brak, Krótki, Podwójny, Kuranty, Westminster, Ostrzeżenie, Alarm]
       mruganie:
-        name: Mruganie ekranu (s)
+        name: Screen blink (s)
         default: 0
         selector:
           number:
@@ -315,7 +309,7 @@ script:
             max: 60
             unit_of_measurement: s
       czas:
-        name: Zamknij po (s, 0 = do OK)
+        name: Close after (s, 0 = until OK)
         default: 0
         selector:
           number:
@@ -323,19 +317,19 @@ script:
             max: 3600
             unit_of_measurement: s
       przycisk:
-        name: Drugi przycisk (puste = tylko OK)
+        name: Second button (empty = OK only)
         example: Wyłącz
         selector:
           text:
       ident:
-        name: Identyfikator (wraca w zdarzeniu esphome.nspanel_dom)
+        name: Identifier (returned in the esphome.nspanel_dom event)
         example: light.YOUR_HALLWAY_LIGHT
         selector:
           text:
     sequence:
       - action: esphome.nspanel_dom_wiadomosc
         data:
-          tytul: "{{ tytul | default('Wiadomość') }}"
+          tytul: "{{ tytul | default('Message' if is_state('input_select.nspanel_dom_language', 'en') else 'Wiadomość') }}"
           tresc: "{{ tresc | default('') }}"
           poziom: "{{ poziom | default(0) | int(0) }}"
           dzwiek: "{{ dzwiek | default('Krótki') }}"
@@ -345,17 +339,17 @@ script:
           ident: "{{ ident | default('') }}"
 
   nspanel_dom_odliczanie:
-    alias: NSPanel Dom - odliczanie do zgaszenia
+    alias: NSPanel Dom - countdown to switch-off
     icon: mdi:timer-sand
     mode: restart
     fields:
       encja:
-        name: Encja
+        name: Entity
         required: true
         selector:
           entity:
       sekundy:
-        name: Sekundy
+        name: Seconds
         default: 60
         selector:
           number:
@@ -368,11 +362,11 @@ script:
       - action: script.nspanel_dom_wiadomosc
         data:
           tytul: "{{ nazwa }}"
-          tresc: "Światło zgaśnie za {s} s."
+          tresc: "{{ 'The light will turn off in {s} s.' if is_state('input_select.nspanel_dom_language', 'en') else 'Światło zgaśnie za {s} s.' }}"
           poziom: "1"
           dzwiek: Brak
           czas: "{{ sek }}"
-          przycisk: Anuluj
+          przycisk: "{{ 'Cancel' if is_state('input_select.nspanel_dom_language', 'en') else 'Anuluj' }}"
           ident: "anuluj:{{ encja }}"
       - wait_template: "{{ not is_state(encja, 'on') }}"
         timeout:
@@ -390,7 +384,7 @@ script:
           ident: "anuluj:{{ encja }}"
 
   nspanel_dom_uklad_wyslij:
-    alias: NSPanel Dom - wyslij uklad
+    alias: NSPanel Dom - send layout
     icon: mdi:send
     mode: restart
     sequence:
@@ -417,7 +411,7 @@ script:
             {%- endfor -%}
 
   nspanel_dom_sync:
-    alias: NSPanel Dom - synchronizacja katalogu
+    alias: NSPanel Dom - catalog sync
     icon: mdi:sync
     mode: restart
     sequence:
@@ -453,7 +447,7 @@ script:
       - action: script.nspanel_dom_prognoza
 
   nspanel_dom_prognoza:
-    alias: NSPanel Dom - prognoza
+    alias: NSPanel Dom - forecast
     icon: mdi:weather-cloudy-clock
     mode: queued
     max: 2
@@ -464,7 +458,7 @@ script:
           dni: "{{ state_attr('sensor.nspanel_dom_pogoda_info', 'dni') | default('', true) }}"
 
   nspanel_dom_glowny:
-    alias: NSPanel Dom - ekran glowny
+    alias: NSPanel Dom - home screen
     icon: mdi:weather-partly-cloudy
     mode: queued
     max: 3
@@ -515,7 +509,7 @@ script:
 
 automation:
   - id: nspanel_dom_synchronizacja
-    alias: NSPanel Dom - synchronizacja
+    alias: NSPanel Dom - sync
     mode: restart
     triggers:
       - trigger: event
@@ -543,8 +537,8 @@ automation:
       - action: script.nspanel_dom_sync
 
   - id: nspanel_dom_glowny_na_zywo
-    alias: NSPanel Dom - ekran glowny na zywo
-    description: Maksymalnie jedna wysylka na 2 s, zawsze najnowsze wartosci.
+    alias: NSPanel Dom - home screen live
+    description: At most one push every 2 s, always the latest values.
     mode: single
     max_exceeded: silent
     triggers:
@@ -564,7 +558,7 @@ automation:
       - action: script.nspanel_dom_glowny
 
   - id: nspanel_dom_uklad_auto
-    alias: NSPanel Dom - uklad na panel
+    alias: NSPanel Dom - layout to panel
     mode: restart
     triggers:
       - trigger: state
@@ -579,7 +573,7 @@ automation:
       - action: script.nspanel_dom_glowny
 
   - id: nspanel_dom_przypomnienie_swiatlo
-    alias: NSPanel Dom - przypomnienie o zapalonym swietle
+    alias: NSPanel Dom - light-left-on reminder
     description: >-
       Ustawienia na panelu (Konfiguracja): Przypomnienie o swietle, Przypomnienie encje
       (puste = swiatla z obszaru/nazwy "korytarz"), po, co, poziom, dzwiek, mruganie, wyswietlaj.
@@ -629,18 +623,18 @@ automation:
               value_template: "{{ m >= cfg.po and (m - cfg.po) % cfg.co == 0 }}"
             - action: script.nspanel_dom_wiadomosc
               data:
-                tytul: Światło się pali
-                tresc: "{{ state_attr(e, 'friendly_name') or e }} świeci od {{ m }} min."
+                tytul: "{{ 'Light is on' if is_state('input_select.nspanel_dom_language', 'en') else 'Światło się pali' }}"
+                tresc: "{{ state_attr(e, 'friendly_name') or e }} {{ 'has been on for' if is_state('input_select.nspanel_dom_language', 'en') else 'świeci od' }} {{ m }} min."
                 poziom: "{{ cfg.poz }}"
                 dzwiek: "{{ cfg.dzw }}"
                 mruganie: "{{ cfg.mrug }}"
                 czas: "{{ cfg.czas }}"
-                przycisk: Wyłącz
+                przycisk: "{{ 'Turn off' if is_state('input_select.nspanel_dom_language', 'en') else 'Wyłącz' }}"
                 ident: "{{ e }}"
 
   - id: nspanel_dom_wiadomosc_przycisk
-    alias: NSPanel Dom - drugi przycisk wiadomosci
-    description: Przycisk "Wyłącz" w oknie wiadomosci wylacza encje podana jako identyfikator.
+    alias: NSPanel Dom - message second button
+    description: The "Turn off" button in the message window turns off the entity given as identifier.
     mode: queued
     triggers:
       - trigger: event
@@ -656,7 +650,7 @@ automation:
           entity_id: "{{ trigger.event.data.ident }}"
 
   - id: nspanel_dom_korytarz_okno
-    alias: NSPanel Dom - korytarz okno po wlaczeniu
+    alias: NSPanel Dom - hallway window on switch-on
     description: >-
       Po wlaczeniu swiatla na korytarzu: pik i okno z opcja zgaszenia za N s.
       Ustawienia na panelu: "Korytarz: okno po wlaczeniu", "Korytarz: zgas po", "Korytarz: okno widoczne";
@@ -707,11 +701,11 @@ automation:
               - action: script.nspanel_dom_wiadomosc
                 data:
                   tytul: "{{ state_attr(e, 'friendly_name') or e }}"
-                  tresc: Światło włączone.
+                  tresc: "{{ 'Light turned on.' if is_state('input_select.nspanel_dom_language', 'en') else 'Światło włączone.' }}"
                   poziom: "0"
                   dzwiek: Krótki
                   czas: "{{ cfg.okno }}"
-                  przycisk: "Zgaś za {{ cfg.zgas }} s"
+                  przycisk: "{{ 'Off in' if is_state('input_select.nspanel_dom_language', 'en') else 'Zgaś za' }} {{ cfg.zgas }} s"
                   ident: "odlicz:{{ e }}"
           - conditions:
               - condition: template
@@ -728,7 +722,7 @@ automation:
                   entity_id: script.nspanel_dom_odliczanie
 
   - id: nspanel_dom_korytarz_przyciski
-    alias: NSPanel Dom - korytarz odliczanie i anuluj
+    alias: NSPanel Dom - hallway countdown and cancel
     mode: queued
     triggers:
       - trigger: event
@@ -762,7 +756,7 @@ automation:
               entity_id: script.nspanel_dom_odliczanie
 
   - id: nspanel_dom_prognoza_auto
-    alias: NSPanel Dom - prognoza na panel
+    alias: NSPanel Dom - forecast to panel
     mode: queued
     max: 2
     triggers:
@@ -777,7 +771,7 @@ automation:
       - action: script.nspanel_dom_prognoza
 
   - id: nspanel_dom_stany
-    alias: NSPanel Dom - stany na zywo
+    alias: NSPanel Dom - live states
     mode: queued
     max: 50
     max_exceeded: silent

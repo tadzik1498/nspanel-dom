@@ -52,14 +52,25 @@ Add a language by copying the `en` block in `TR` (top of `dist/nspanel-dom-edito
 
 Card options: `language`, `g13_entity`, `dom_entity`, `layout_entity`, `catalog_entity`, `info_entity`, `save_script`.
 
+## Languages (all parts)
+- Editor card: en, pl, de, uk (follows HA)
+- Panel screen: `language: pl|en` in the firmware substitutions (`esphome/nspanel_i18n.h`)
+- HA-generated texts: `input_select.nspanel_dom_language` (pl/en)
+- Details and what is intentionally not translated: `docs/TRANSLATING.md`
+
+## Building the display file
+No `.HMI` source is needed – the Nextion project is a blank page with fonts and touch code:
+see `docs/BUILD-TFT.md` (or use the compiled `display/nspanel_dom.tft`).
+
 ## Known limitations
-- Firmware on-screen texts and the HA package (names such as `nspanel_dom_*`, hallway feature) are still Polish – translating them is the next step.
+- Entity names created by the firmware (e.g. `Korytarz: zgaś po`), sound names and some code comments are still Polish (see `docs/TRANSLATING.md`).
+- The firmware translation was checked for C++ syntax patterns only, not compiled on a device – please report issues.
 - Default entities in the firmware/package are placeholders (`YOUR_*`) – replace them.
 
 ## Roadmap
 - Split editor into modules with a pluggable tile-type registry
-- Firmware + HA package i18n
-- Nextion `.HMI` source, tile-type contribution guide
+- More languages for the panel screen (needs matching Nextion fonts)
+- Tile-type contribution guide
 - CI: YAML + JS lint (workflows are in docs/ci/, to be enabled)
 
 ## Author

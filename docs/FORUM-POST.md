@@ -10,7 +10,7 @@ No YAML editing, no reflashing for layout changes.
 - Drag to move, drop on another tile to **swap**, resize from any edge/corner (neighbours shrink)
 - Tiles: weather + clock, value, value with bar, switch, climate, tariff dial (Polish G13), house (roof / indoor temp + climate + power bar)
 - Preview uses the **same font-fitting algorithm as the firmware**, so what you see is what the panel shows
-- UI in **English, Polish, German, Ukrainian** (follows the HA language; add yours in one block)
+- Editor UI in **English, Polish, German, Ukrainian** (follows the HA language); panel screen texts and HA-generated texts in **EN/PL** (see docs/TRANSLATING.md)
 
 ## How it works
 ```mermaid

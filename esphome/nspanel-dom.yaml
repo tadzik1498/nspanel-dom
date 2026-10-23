@@ -1,61 +1,27 @@
 # =====================================================================
-#  NSPanel Dom - dynamiczny panel domu dla Sonoff NSPanel EU (ESPHome)
-#  v1.14 - G13: zamiast paska dnia trzeci (zewnetrzny) pierscien = tarcza 24 h ze strefami,
-#          znacznikami godzin, cyframi 0/6/12/18 i wskazowka "teraz"
-#  v1.13 - czytelnosc dla seniora: G13 z gruba ramka w kolorze strefy, duze wartosci,
-#          znaczniki godzin na pasku dnia; Dom: pelny domek z gruba obwodka, dwa
-#          ujednolicone rozmiary wartosci; korytarz: zgas po 30 s (domyslnie)
-#  v1.12 - kafelki G13 i Dom na tle nieba spojnym z pogoda (pasma wg pogody i pory dnia),
-#          tekst przezroczysty z cieniem jak na kafelku pogody
-#  v1.11 - kafelek "Dom" (domek: temp. na dachu, w domu, klima, moc; typ V z opcja dom,
-#          encja sensor.panel_dom_dane, dotkniecie = sterowanie klimatyzacja)
-#  v1.10 - kafelek "Prad G13" (typ V z opcja g13, encja sensor.nspanel_g13_data),
-#          kolejka komend Nextion 800, odswiezanie kafelkow V co minute
-#  v1.9 - odliczanie w oknie ({s} w tresci), okno przy wlaczeniu swiatla na korytarzu
+#  NSPanel Dom - dynamic home panel for Sonoff NSPanel EU (ESPHome)
+#  Version history: see CHANGELOG.md. Current: v1.14
 #
 #  Idea:
-#   - wykrywanie encji i sugestie robi Home Assistant (pakiet
-#     nspanel_dom_ha.yaml), panel dostaje gotowy katalog
-#     pomieszczen -> encji przez akcje API (begin/area/done/state)
-#   - nic nie jest wkompilowane na sztywno: zmiana pomieszczen,
-#     nowe encje, zmiana przypisan = bez ponownego flashowania
-#   - wybor encji (sugerowane / dodane / ukryte) i przeniesienie
-#     encji do innego pomieszczenia robi sie NA PANELU (Edytuj),
-#     zapis w pamieci flash panelu
-#   - UI rysowane z ESP prymitywami Nextion (fill/xstr/cirs),
-#     TFT zawiera tylko jedna pusta strone + 4 fonty + kod dotyku
+#   - entity discovery and suggestions are done by Home Assistant (package
+#     nspanel_dom_ha.yaml); the panel receives a ready catalog of areas -> entities
+#     through API actions (begin/area/done/state)
+#   - nothing is hard-coded: new areas, entities or assignments need no reflashing
+#   - choosing entities (suggested / added / hidden) and moving an entity to another
+#     area is done ON THE PANEL (Edit), stored in the panel's flash
+#   - the UI is drawn by the ESP with Nextion primitives (fill/xstr/cirs); the TFT
+#     contains one empty page + 5 fonts + touch code (see docs/BUILD-TFT.md)
 #
-#  TFT (jednorazowo, Nextion Editor, Windows):
-#   1. New project, model NX4832F035_011, kierunek Horizontal 0 (480x320)
-#   2. Tools > Font Generator, kodowanie iso-8859-2, dodaj w kolejnosci:
-#        font 0: 16 px, font 1: 24 px, font 2: 32 px,
-#        font 3: 56 px bold (Arial Bold - liczby w kafelkach),
-#        font 4: 72 px bold (Arial Bold - zegar i temp. zewnetrzna)
-#   3. page0: bez komponentow, sta = solid color, bco = 2146
-#   4. page0 > Touch Press Event:
-#        sys0=tch0/30
-#        sys1=tch1/20
-#        sys2=sys1*16
-#        sys2+=sys0
-#        printh 65 00
-#        prints sys2,1
-#        printh 01 ff ff ff
-#   5. page0 > Touch Release Event:
-#        printh 65 00 00 00 ff ff ff
-#   6. File > TFT file output -> nspanel_dom.tft
-#      skopiuj do HA: /config/www/nspanel/nspanel_dom.tft
-#   7. Po wgraniu tego firmware: w HA przycisk "Wgraj TFT"
-#
-#  Siatka dotyku: 16 kolumn x 16 wierszy (30 x 20 px), numer komorki
-#  przychodzi jako component_id w zdarzeniu on_touch.
-#
-#  W HA: Ustawienia > Urzadzenia > ESPHome > NSPanel Dom > Konfiguruj
-#  -> zaznacz "Allow the device to perform Home Assistant actions".
+#  On-screen language: substitution `language: pl|en` (nspanel_i18n.h).
+#  In HA: Settings > Devices > ESPHome > NSPanel Dom > Configure
+#   -> tick "Allow the device to perform Home Assistant actions".
 # =====================================================================
 
 substitutions:
   name: nspanel-dom
-  # uklad startowy ekranu glownego (ten sam co domyslny w HA); zastepuje go uklad z edytora
+  # on-screen language: pl (default) or en - see nspanel_i18n.h
+  language: pl
+  # built-in start layout (same as the default in HA); replaced by the layout from the editor
   e_temp_dom: sensor.YOUR_INDOOR_TEMPERATURE
   e_klima: climate.YOUR_CLIMATE
   e_moc: sensor.YOUR_POWER_W
@@ -69,6 +35,10 @@ substitutions:
 esphome:
   name: ${name}
   friendly_name: ${friendly}
+  includes:
+    - nspanel_i18n.h
+  platformio_options:
+    build_flags: -DNSPANEL_LANG_${language}
   on_boot:
     - priority: 800
       then:
@@ -223,11 +193,11 @@ esphome:
               const std::string &x = id(g_ex)[i];
               if (s == "unavailable" || s == "unknown") return "n/d";
               if (d == "light") {
-                if (s != "on") return "Wył.";
+                if (s != "on") return nsT("Wył.");
                 if (!x.empty() && x != "0") return x + "%";
-                return "Wł.";
+                return nsT("Wł.");
               }
-              if (d == "switch" || d == "input_boolean" || d == "fan") return s == "on" ? "Wł." : "Wył.";
+              if (d == "switch" || d == "input_boolean" || d == "fan") return s == "on" ? nsT("Wł.") : nsT("Wył.");
               if (d == "climate") {
                 std::string c = id(f_part)(x, 0);
                 if (!c.empty()) return id(f_fmt)(c) + "°";
@@ -235,26 +205,26 @@ esphome:
               }
               if (d == "cover") {
                 if (!x.empty()) return x + "%";
-                if (s == "open") return "Otwarte";
-                if (s == "closed") return "Zamknięte";
-                if (s == "opening") return "Otwiera";
-                if (s == "closing") return "Zamyka";
+                if (s == "open") return nsT("Otwarte");
+                if (s == "closed") return nsT("Zamknięte");
+                if (s == "opening") return nsT("Otwiera");
+                if (s == "closing") return nsT("Zamyka");
                 return s;
               }
               if (d == "binary_sensor") {
-                if (x == "door" || x == "window" || x == "opening" || x == "garage_door") return s == "on" ? "Otwarte" : "Zamknięte";
-                if (x == "motion" || x == "occupancy" || x == "presence") return s == "on" ? "Ruch" : "Brak";
-                return s == "on" ? "Wł." : "Wył.";
+                if (x == "door" || x == "window" || x == "opening" || x == "garage_door") return s == "on" ? nsT("Otwarte") : nsT("Zamknięte");
+                if (x == "motion" || x == "occupancy" || x == "presence") return s == "on" ? nsT("Ruch") : nsT("Brak");
+                return s == "on" ? nsT("Wł.") : nsT("Wył.");
               }
-              if (d == "lock") return s == "locked" ? "Zamknięty" : (s == "unlocked" ? "Otwarty" : s);
+              if (d == "lock") return s == "locked" ? nsT("Zamknięty") : (s == "unlocked" ? nsT("Otwarty") : s);
               if (d == "media_player") {
-                if (s == "playing") return "Gra";
-                if (s == "paused") return "Pauza";
-                if (s == "off") return "Wył.";
-                if (s == "idle") return "Czeka";
+                if (s == "playing") return nsT("Gra");
+                if (s == "paused") return nsT("Pauza");
+                if (s == "off") return nsT("Wył.");
+                if (s == "idle") return nsT("Czeka");
                 return s;
               }
-              if (d == "script") return s == "on" ? "Działa" : "";
+              if (d == "script") return s == "on" ? nsT("Działa") : "";
               if (d == "scene") return "";
               std::string v = id(f_fmt)(s);
               if (!x.empty()) {
@@ -597,7 +567,7 @@ esphome:
             };
             id(f_wname) = [](const std::string &c) -> std::string {
               static const char *k[] = {"sunny", "clear-night", "partlycloudy", "cloudy", "fog", "rainy", "pouring", "hail", "snowy", "snowy-rainy", "lightning", "lightning-rainy", "windy", "windy-variant", "exceptional"};
-              static const char *v[] = {"Słonecznie", "Pogodnie", "Małe zachmurzenie", "Pochmurno", "Mgła", "Deszcz", "Ulewa", "Grad", "Śnieg", "Śnieg z deszczem", "Burza", "Burza z deszczem", "Wietrznie", "Wietrznie", "Uwaga - pogoda"};
+              static const char *v[] = {nsT("Słonecznie"), nsT("Pogodnie"), nsT("Małe zachmurzenie"), nsT("Pochmurno"), nsT("Mgła"), nsT("Deszcz"), nsT("Ulewa"), nsT("Grad"), nsT("Śnieg"), nsT("Śnieg z deszczem"), nsT("Burza"), nsT("Burza z deszczem"), nsT("Wietrznie"), nsT("Wietrznie"), nsT("Uwaga - pogoda")};
               for (int i = 0; i < 15; i++) if (c == k[i]) return v[i];
               return c;
             };
@@ -642,7 +612,7 @@ esphome:
             // climate tile main value
             id(f_kval) = []() -> std::string {
               if (id(k_id).empty()) return "--";
-              if (id(k_st) == "off") return "Wył.";
+              if (id(k_st) == "off") return nsT("Wył.");
               char *end = nullptr;
               float t = strtof(id(k_tgt).c_str(), &end);
               if (id(k_tgt).empty() || end == id(k_tgt).c_str()) return "--";
@@ -660,8 +630,8 @@ esphome:
               frac = 0;
               if (!num) {
                 if (s.empty() || s == "unavailable" || s == "unknown") val = "--";
-                else if (s == "on") val = "Wł.";
-                else if (s == "off") val = "Wył.";
+                else if (s == "on") val = nsT("Wł.");
+                else if (s == "off") val = nsT("Wył.");
                 else val = id(f_lbl)(0, s);
               } else {
                 if (id(lt_t)[i] == "B") {
@@ -857,7 +827,7 @@ esphome:
               id(f_fill)(x + w - fr, y, fr, h, zc);
               int X = x + fr + 4, Y = y + fr + 2, W = w - 2 * fr - 8, H = h - 2 * fr - 4;
               // header: zone name + end of the zone
-              std::string zn = z == "B" ? "Drogi" : (z == "A" ? "Średni" : (z == "P" ? "Tani" : "G13"));
+              std::string zn = z == "B" ? nsT("Drogi") : (z == "A" ? nsT("Średni") : (z == "P" ? nsT("Tani") : "G13"));
               std::string nx = ok ? fld(1) : "";
               int hh = H >= 140 ? 38 : 30, hh2 = 0;
               std::string head = nx.empty() ? zn : zn + " do " + nx, sub = "";
@@ -998,11 +968,11 @@ esphome:
               if (centre) id(f_strt)(cx - hole, cy - chh / 2, 2 * hole, chh, id(f_fit)(ct, 2 * hole - 6, chh, 3), 65535, 1, ct);
               // legend: one font size for all rows (the largest that fits every row)
               char l1[24], l2[24], l3[24];
-              snprintf(l1, sizeof(l1), "Tani %.0f%%", tot > 0 ? sP * 100 / tot : 0.0f);
-              snprintf(l2, sizeof(l2), "Średni %.0f%%", tot > 0 ? sA * 100 / tot : 0.0f);
-              snprintf(l3, sizeof(l3), "Drogi %.0f%%", tot > 0 ? sB * 100 / tot : 0.0f);
+              snprintf(l1, sizeof(l1), nsT("Tani %.0f%%"), tot > 0 ? sP * 100 / tot : 0.0f);
+              snprintf(l2, sizeof(l2), nsT("Średni %.0f%%"), tot > 0 ? sA * 100 / tot : 0.0f);
+              snprintf(l3, sizeof(l3), nsT("Drogi %.0f%%"), tot > 0 ? sB * 100 / tot : 0.0f);
               // 4th row: savings % when the centre is too small, else this month in PLN
-              std::string m4 = !centre && ok ? std::string("Taniej o ") + ct : (mon.empty() ? "" : "+" + mon + " zł/mies.");
+              std::string m4 = !centre && ok ? std::string(nsT("Taniej o ")) + ct : (mon.empty() ? "" : "+" + mon + nsT(" zł/mies."));
               if (side) {
                 int lx = X + 2 * R + 10, lw = X + W - lx;
                 int n = (m4.empty() || 2 * R < 4 * 26) ? 3 : 4;
@@ -1037,7 +1007,7 @@ esphome:
             };
             // ---------------- house tile ----------------
             // layout tile "V" with opt2 == "dom" (editor type "Dom")
-            // state (sensor.panel_dom_dane): "t_in;t_roof;power_W;power_max_W"
+            // state (sensor.nspanel_house_data): "t_in;t_roof;power_W;power_max_W"
             // climate values come from the klima action (k_* globals)
             // look: sky background, solid dark house with a thick outline, two unified
             // value sizes (indoor + climate big, roof + power second) for elderly users
@@ -1136,7 +1106,7 @@ esphome:
               int rbw = hw * 60 / 100, rbh = rh * 58 / 100, rby = ey - rbh - 1;
               int ibx = wl + lwi + 1, ibw = wr - wl - 2 * lwi - 2, iby = ey + 2, ibh = hb - lwi - 2 - iby;
               int lab = ibh >= 90 ? 26 : 0;                            // "W domu" label when there is room
-              std::string kv = koff ? (id(k_id).empty() ? std::string("--") : std::string("Wył.")) : id(f_kval)();
+              std::string kv = koff ? (id(k_id).empty() ? std::string("--") : std::string(nsT("Wył."))) : id(f_kval)();
               char pb[24];
               if (!hpw) snprintf(pb, sizeof(pb), "--");
               else if (fabsf(pw) >= 1000) snprintf(pb, sizeof(pb), "%.1f kW", pw / 1000.0f);
@@ -1206,8 +1176,8 @@ esphome:
                 int lh = h >= 90 ? h - 42 : h - 12;
                 id(f_str)(x + pad, top, w - 2 * pad, lh, id(f_fit)(l, w - 2 * pad - 4, lh, 2), fg, bg, 1, l);
                 if (h >= 90) {
-                  std::string st = (s == "unavailable" || s == "unknown") ? std::string("n/d") : (on ? std::string("Wł.") : std::string("Wył."));
-                  if (d == "scene" || d == "script") st = "Uruchom";
+                  std::string st = (s == "unavailable" || s == "unknown") ? std::string("n/d") : (on ? std::string(nsT("Wł.")) : std::string(nsT("Wył.")));
+                  if (d == "scene" || d == "script") st = nsT("Uruchom");
                   id(f_str)(x + pad, y + h - 36, w - 2 * pad, 30, 1, on ? 4226 : id(f_rgb)(200, 206, 220), bg, 1, st);
                 }
                 return;
@@ -1216,8 +1186,8 @@ esphome:
               int lh = h >= 100 ? 30 : 22;
               if (t == "K") {
                 bool off = id(k_st) == "off" || id(k_id).empty();
-                std::string lab = id(lt_l)[i].empty() ? std::string("Klimatyzacja") : id(lt_l)[i];
-                if (lab == "Klimatyzacja" && id(f_fit)(lab, w - 2 * pad, 28, 1) < 1) lab = "Klima";
+                std::string lab = id(lt_l)[i].empty() ? std::string(nsT("Klimatyzacja")) : id(lt_l)[i];
+                if (lab == nsT("Klimatyzacja") && id(f_fit)(lab, w - 2 * pad, 28, 1) < 1) lab = nsT("Klima");
                 id(f_label)(x + pad, top, w - 2 * pad, lh, TL, lab);
                 int tail = h >= 140 ? 56 : (h >= 105 ? 30 : 0);
                 int vy = top + lh, vh = y + h - 4 - tail - vy;
@@ -1229,7 +1199,7 @@ esphome:
                 }
                 if (!off && tail >= 56 && !id(k_fan).empty()) {
                   std::string fn = id(f_lbl)(2, id(k_fan));
-                  std::string f = "Nawiew: " + fn;
+                  std::string f = nsT("Nawiew: ") + fn;
                   if (id(f_fit)(f, w - 12, 26, 1) < 1) f = fn;
                   id(f_str)(x + 4, y + h - 30, w - 8, 26, id(f_fit)(f, w - 12, 26, 1), id(f_rgb)(200, 206, 220), TL, 1, f);
                 }
@@ -1300,8 +1270,8 @@ esphome:
               int sb = id(f_sbg)();
               id(f_fill)(0, 0, 480, 320, sb);
               if (id(lt_t).empty()) {
-                id(f_str)(20, 120, 440, 36, 1, 61278, sb, 1, "Brak układu ekranu");
-                id(f_str)(20, 160, 440, 30, 0, 35988, sb, 1, "Ułóż kafelki w edytorze NSPanel Dom w HA");
+                id(f_str)(20, 120, 440, 36, 1, 61278, sb, 1, nsT("Brak układu ekranu"));
+                id(f_str)(20, 160, 440, 30, 0, 35988, sb, 1, nsT("Ułóż kafelki w edytorze NSPanel Dom w HA"));
                 return;
               }
               for (int i = 0; i < (int) id(lt_t).size(); i++) id(f_ltile)(i);
@@ -1333,7 +1303,7 @@ esphome:
 
             // forecast card: 8 hours on top, 5 days below
             id(f_forecast) = []() {
-              id(f_top)("Prognoza pogody", "<", "");
+              id(f_top)(nsT("Prognoza pogody"), "<", "");
               id(f_fill)(0, 40, 480, 280, 2146);
               auto &H = id(fc_h);
               auto &D = id(fc_d);
@@ -1382,43 +1352,43 @@ esphome:
               std::string l = v;
               for (auto &c : l) { c = tolower(c); if (c == ' ' || c == '-') c = '_'; }
               if (kind <= 1) {
-                if (l == "off") return "Wył.";
-                if (l == "heat") return "Grzanie";
-                if (l == "cool") return kind == 0 ? "Chłodzenie" : "Chłodz.";
+                if (l == "off") return nsT("Wył.");
+                if (l == "heat") return nsT("Grzanie");
+                if (l == "cool") return kind == 0 ? nsT("Chłodzenie") : nsT("Chłodz.");
                 if (l == "auto" || l == "heat_cool") return "Auto";
-                if (l == "dry") return kind == 0 ? "Osuszanie" : "Osusz.";
-                if (l == "fan_only") return kind == 0 ? "Wentylator" : "Went.";
+                if (l == "dry") return kind == 0 ? nsT("Osuszanie") : nsT("Osusz.");
+                if (l == "fan_only") return kind == 0 ? nsT("Wentylator") : nsT("Went.");
                 return v;
               }
               if (kind == 2) {
                 if (l == "auto") return "Auto";
-                if (l == "quiet" || l == "silent") return "Cichy";
-                if (l == "low") return "Niski";
-                if (l == "medium_low" || l == "mediumlow") return "Śr.-niski";
-                if (l == "medium" || l == "mid") return "Średni";
-                if (l == "medium_high" || l == "mediumhigh") return "Śr.-wys.";
-                if (l == "high") return "Wysoki";
+                if (l == "quiet" || l == "silent") return nsT("Cichy");
+                if (l == "low") return nsT("Niski");
+                if (l == "medium_low" || l == "mediumlow") return nsT("Śr.-niski");
+                if (l == "medium" || l == "mid") return nsT("Średni");
+                if (l == "medium_high" || l == "mediumhigh") return nsT("Śr.-wys.");
+                if (l == "high") return nsT("Wysoki");
                 if (l == "turbo" || l == "boost") return "Turbo";
                 return v;
               }
               if (kind == 3) {
-                if (l == "off" || l == "default" || l == "fixed") return "Stały";
-                if (l == "on" || l == "swing") return "Ruchomy";
-                if (l == "vertical") return "Pion";
-                if (l == "horizontal") return "Poziom";
-                if (l == "both") return "Pion + poziom";
-                if (l.find("full") != std::string::npos) return "Pełny zakres";
-                if (l.find("upmost") != std::string::npos || l.find("top") != std::string::npos) return "Góra";
-                if (l.find("lowest") != std::string::npos || l.find("bottom") != std::string::npos) return "Dół";
-                if (l.find("middle") != std::string::npos) return "Środek";
+                if (l == "off" || l == "default" || l == "fixed") return nsT("Stały");
+                if (l == "on" || l == "swing") return nsT("Ruchomy");
+                if (l == "vertical") return nsT("Pion");
+                if (l == "horizontal") return nsT("Poziom");
+                if (l == "both") return nsT("Pion + poziom");
+                if (l.find("full") != std::string::npos) return nsT("Pełny zakres");
+                if (l.find("upmost") != std::string::npos || l.find("top") != std::string::npos) return nsT("Góra");
+                if (l.find("lowest") != std::string::npos || l.find("bottom") != std::string::npos) return nsT("Dół");
+                if (l.find("middle") != std::string::npos) return nsT("Środek");
                 return v;
               }
-              if (l == "none") return "Brak";
+              if (l == "none") return nsT("Brak");
               if (l == "eco") return "Eco";
               if (l == "boost") return "Turbo";
-              if (l == "sleep") return "Sen";
-              if (l == "away") return "Poza domem";
-              if (l == "comfort") return "Komfort";
+              if (l == "sleep") return nsT("Sen");
+              if (l == "away") return nsT("Poza domem");
+              if (l == "comfort") return nsT("Komfort");
               return v;
             };
             id(f_hvc) = [](const std::string &m) -> int {
@@ -1432,7 +1402,7 @@ esphome:
             // climate control screen (view 7)
             id(f_klima) = []() {
               std::string cur = id(k_cur);
-              std::string title = "Klimatyzacja";
+              std::string title = nsT("Klimatyzacja");
               if (!cur.empty() && cur != "None") title += "  (" + id(f_fmt)(cur) + "° w pom.)";
               id(f_top)(title, "<", "");
               id(f_fill)(0, 40, 480, 280, 2146);
@@ -1460,8 +1430,8 @@ esphome:
                 bool a = F[k] == id(k_fan);
                 id(f_str)(4 + c * bw, 162 + r * 46, bw - 4, 42, 0, a ? 4226 : 61278, a ? 11828 : 14858, 1, id(f_lbl)(2, F[k]));
               }
-              std::string sw = "Kierunek: " + id(f_lbl)(3, id(k_swing));
-              std::string pr = "Tryb: " + id(f_lbl)(4, id(k_preset));
+              std::string sw = nsT("Kierunek: ") + id(f_lbl)(3, id(k_swing));
+              std::string pr = nsT("Tryb: ") + id(f_lbl)(4, id(k_preset));
               if (!id(k_sm).empty()) id(f_str)(4, 256, 234, 58, id(f_len)(sw) <= 18 ? 1 : 0, 61278, 14858, 1, sw);
               if (!id(k_pm).empty()) id(f_str)(242, 256, 234, 58, id(f_len)(pr) <= 18 ? 1 : 0, 61278, 14858, 1, pr);
             };
@@ -1535,9 +1505,9 @@ esphome:
               int na = id(a_name).size();
               if (id(g_sync) || na == 0) {
                 id(f_fill)(0, 0, 480, 320, 2146);
-                id(f_top)("Dom", "", "");
+                id(f_top)(nsT("Dom"), "", "");
                 id(f_str)(20, 120, 440, 40, 1, 61278, 2146, 1, id(g_sync) ? "Synchronizacja z HA..." : "Czekam na dane z Home Assistant");
-                if (!id(g_sync)) id(f_str)(20, 170, 440, 30, 0, 35988, 2146, 1, "Sprawdź pakiet nspanel_dom w HA");
+                if (!id(g_sync)) id(f_str)(20, 170, 440, 30, 0, 35988, 2146, 1, nsT("Sprawdź pakiet nspanel_dom w HA"));
                 return;
               }
               if (id(v_area) < 0 || id(v_area) >= na) id(v_area) = 0;
@@ -1548,17 +1518,17 @@ esphome:
                 int n = id(v_list).size();
                 int pages = n > 0 ? (n + 5) / 6 : 1;
                 if (id(v_tpage) >= pages) id(v_tpage) = 0;
-                id(f_top)(id(a_name)[id(v_area)], id(o_ok) ? "Dom" : "<", ">");
+                id(f_top)(id(a_name)[id(v_area)], id(o_ok) ? nsT("Dom") : "<", ">");
                 id(f_fill)(0, 40, 480, 238, 2146);
                 for (int s = 0; s < 6; s++) id(f_tile)(s);
                 if (n == 0) {
-                  id(f_str)(20, 110, 440, 36, 1, 61278, 2146, 1, "Brak wybranych encji");
-                  id(f_str)(20, 150, 440, 30, 0, 35988, 2146, 1, "Dotknij Edytuj, aby wybrać z sugestii");
+                  id(f_str)(20, 110, 440, 36, 1, 61278, 2146, 1, nsT("Brak wybranych encji"));
+                  id(f_str)(20, 150, 440, 30, 0, 35988, 2146, 1, nsT("Dotknij Edytuj, aby wybrać z sugestii"));
                 }
                 char pg[32];
                 snprintf(pg, sizeof(pg), "%d / %d", id(v_tpage) + 1, pages);
                 std::string fl = id(a_floor)[id(v_area)];
-                id(f_bot)("Edytuj", fl.empty() ? std::string(pg) : fl + "   " + pg, pages > 1 ? "Strona >" : "", false);
+                id(f_bot)(nsT("Edytuj"), fl.empty() ? std::string(pg) : fl + "   " + pg, pages > 1 ? nsT("Strona >") : "", false);
                 return;
               }
 
@@ -1566,8 +1536,8 @@ esphome:
                 int per = 10;
                 int pages = (na + per - 1) / per;
                 if (id(v_rpage) >= pages) id(v_rpage) = 0;
-                if (v == 1) id(f_top)("Pomieszczenia", "<", "Jasn.");
-                else id(f_top)("Przenieś: " + id(g_name)[id(v_pick)], "<", "");
+                if (v == 1) id(f_top)(nsT("Pomieszczenia"), "<", nsT("Jasn."));
+                else id(f_top)(nsT("Przenieś: ") + id(g_name)[id(v_pick)], "<", "");
                 id(f_fill)(0, 40, 480, 238, 2146);
                 for (int s = 0; s < per; s++) {
                   int a = id(v_rpage) * per + s;
@@ -1578,7 +1548,7 @@ esphome:
                   if (v == 1) lbl += " (" + std::to_string(id(f_room)(a, true).size()) + ")";
                   id(f_str)(x, y, 234, 42, 0, cur ? 4226 : 61278, cur ? 11828 : 10599, 1, lbl);
                 }
-                id(f_bot)(pages > 1 ? "< Strona" : "", v == 1 ? "Odśwież z HA" : "Anuluj", pages > 1 ? "Strona >" : "", true);
+                id(f_bot)(pages > 1 ? nsT("< Strona") : "", v == 1 ? nsT("Odśwież z HA") : nsT("Anuluj"), pages > 1 ? nsT("Strona >") : "", true);
                 return;
               }
 
@@ -1588,9 +1558,9 @@ esphome:
                 int n = id(v_list).size();
                 int pages = n > 0 ? (n + per - 1) / per : 1;
                 if (id(v_epage) >= pages) id(v_epage) = 0;
-                id(f_top)("Edycja: " + id(a_name)[id(v_area)], "<", "");
+                id(f_top)(nsT("Edycja: ") + id(a_name)[id(v_area)], "<", "");
                 id(f_fill)(0, 40, 480, 238, 2146);
-                if (n == 0) id(f_str)(20, 120, 440, 36, 1, 61278, 2146, 1, "Brak encji w tym pomieszczeniu");
+                if (n == 0) id(f_str)(20, 120, 440, 36, 1, 61278, 2146, 1, nsT("Brak encji w tym pomieszczeniu"));
                 for (int s = 0; s < per; s++) {
                   int k = id(v_epage) * per + s;
                   if (k >= n) break;
@@ -1603,11 +1573,11 @@ esphome:
                   std::string sub = id(g_eid)[i];
                   if (id(g_sug)[i]) sub = "* " + sub;
                   id(f_str)(56, y + 22, 300, 19, 0, 35988, 10599, 0, sub);
-                  id(f_str)(364, y, 112, 42, 0, 61278, 14858, 1, "Pokój");
+                  id(f_str)(364, y, 112, 42, 0, 61278, 14858, 1, nsT("Pokój"));
                 }
                 char pg[40];
                 snprintf(pg, sizeof(pg), "%d / %d   * sugerowane", id(v_epage) + 1, pages);
-                id(f_bot)(pages > 1 ? "< Strona" : "", pg, pages > 1 ? "Strona >" : "", false);
+                id(f_bot)(pages > 1 ? nsT("< Strona") : "", pg, pages > 1 ? nsT("Strona >") : "", false);
                 return;
               }
 
@@ -1626,30 +1596,30 @@ esphome:
                 id(f_fill)(60, 140, 360, 44, 10599);
                 if (pct > 0) id(f_fill)(60, 140, 360 * pct / 100, 44, 64900);
                 id(f_str)(424, 140, 52, 44, 1, 61278, 14858, 1, "+");
-                id(f_str)(4, 214, 472, 56, 1, on ? 4226 : 61278, on ? 64900 : 14858, 1, on ? "Wyłącz" : "Włącz");
+                id(f_str)(4, 214, 472, 56, 1, on ? 4226 : 61278, on ? 64900 : 14858, 1, on ? nsT("Wyłącz") : nsT("Włącz"));
               } else if (d == "climate") {
                 std::string t = id(f_part)(x, 1);
                 bool tv = !t.empty() && t != "None";
                 id(f_str)(4, 140, 80, 50, 1, 61278, 14858, 1, "-");
                 id(f_str)(90, 140, 300, 50, 2, 61278, 2146, 1, tv ? "cel: " + id(f_fmt)(t) + "°" : std::string("cel: --"));
                 id(f_str)(396, 140, 80, 50, 1, 61278, 14858, 1, "+");
-                const char *lab[4] = {"Wył.", "Grzanie", "Chłodz.", "Auto"};
+                const char *lab[4] = {nsT("Wył."), nsT("Grzanie"), nsT("Chłodz."), "Auto"};
                 const char *md[4] = {"off", "heat", "cool", "auto"};
                 for (int k = 0; k < 4; k++) {
                   bool a = id(g_st)[i] == md[k];
                   id(f_str)(4 + k * 119, 214, 115, 56, 0, a ? 4226 : 61278, a ? 11828 : 14858, 1, lab[k]);
                 }
               } else if (d == "cover" || d == "media_player") {
-                const char *lc[3] = {"Otwórz", "Stop", "Zamknij"};
+                const char *lc[3] = {nsT("Otwórz"), "Stop", nsT("Zamknij")};
                 const char *lm[3] = {"<<", "Play / Pauza", ">>"};
                 for (int k = 0; k < 3; k++) id(f_str)(4 + k * 158, 214, 154, 56, 1, 61278, 14858, 1, d == "cover" ? lc[k] : lm[k]);
               } else if (d == "lock") {
-                id(f_str)(4, 214, 234, 56, 1, 61278, 14858, 1, "Zamknij");
-                id(f_str)(242, 214, 234, 56, 1, 61278, 60042, 1, "Otwórz");
+                id(f_str)(4, 214, 234, 56, 1, 61278, 14858, 1, nsT("Zamknij"));
+                id(f_str)(242, 214, 234, 56, 1, 61278, 60042, 1, nsT("Otwórz"));
               } else if (d == "switch" || d == "input_boolean" || d == "fan") {
-                id(f_str)(4, 214, 472, 56, 1, on ? 4226 : 61278, on ? 11828 : 14858, 1, on ? "Wyłącz" : "Włącz");
+                id(f_str)(4, 214, 472, 56, 1, on ? 4226 : 61278, on ? 11828 : 14858, 1, on ? nsT("Wyłącz") : nsT("Włącz"));
               } else if (d == "scene" || d == "script") {
-                id(f_str)(4, 214, 472, 56, 1, 61278, 14858, 1, "Uruchom");
+                id(f_str)(4, 214, 472, 56, 1, 61278, 14858, 1, nsT("Uruchom"));
               } else {
                 id(f_str)(20, 150, 440, 30, 0, 35988, 2146, 1, id(g_eid)[i]);
               }
@@ -1978,10 +1948,10 @@ esphome:
             };
             // built-in start layout: home screen right after boot, replaced by the layout from HA
             id(f_lload)(std::string("W|0|0|10|16||||||\n") +
-                        "V|10|0|7|8|${e_temp_dom}|W domu||||°C\n" +
-                        "K|17|0|7|8|${e_klima}|Klimatyzacja||||\n" +
-                        "B|10|8|7|8|${e_moc}|Moc||${moc_max}||W\n" +
-                        "V|17|8|7|8|${e_temp_dach}|Na dachu||||°C\n");
+                        "V|10|0|7|8|${e_temp_dom}|" + nsT("W domu") + "||||°C\n" +
+                        "K|17|0|7|8|${e_klima}|" + nsT("Klimatyzacja") + "||||\n" +
+                        "B|10|8|7|8|${e_moc}|" + nsT("Moc") + "||${moc_max}||W\n" +
+                        "V|17|8|7|8|${e_temp_dach}|" + nsT("Na dachu") + "||||°C\n");
             id(o_ok) = true;
             id(v_view) = 5;
 esp32:
@@ -2202,7 +2172,7 @@ api:
         ident: string
       then:
         - lambda: |-
-            id(m_title) = tytul.empty() ? std::string("Wiadomość") : tytul;
+            id(m_title) = tytul.empty() ? std::string(nsT("Wiadomość")) : tytul;
             id(m_text) = tresc;
             id(m_lvl) = poziom;
             id(m_btn2) = przycisk;
@@ -3245,8 +3215,8 @@ button:
     entity_category: config
     on_press:
       - lambda: |-
-          id(m_title) = "Test wiadomości";
-          id(m_text) = "To jest przykładowa wiadomość z Home Assistant. Dotknij OK, aby zamknąć.";
+          id(m_title) = nsT("Test wiadomości");
+          id(m_text) = nsT("To jest przykładowa wiadomość z Home Assistant. Dotknij OK, aby zamknąć.");
           id(m_lvl) = 0; id(m_btn2) = ""; id(m_id) = "test"; id(m_on) = true;
           id(m_until) = 0; id(m_flash_until) = millis() + 3000; id(g_dimmed) = false; id(t_last) = millis();
           id(f_sound)("Krótki");
