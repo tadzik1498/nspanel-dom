@@ -7,7 +7,9 @@ Home Assistant, press **Save to panel**, and the layout is pushed to the device.
 > Status: early / personal project being opened up. Interfaces may change. Polish UI strings
 > and entity names in places – translations and generalisation are welcome contributions.
 
-![editor](https://raw.githubusercontent.com/tadzik1498/nspanel-dom/main/docs/img/editor-en.png)
+![demo](https://raw.githubusercontent.com/tadzik1498/nspanel-dom/main/docs/img/editor-demo.gif)
+
+Polski: [README.pl.md](README.pl.md)
 
 ## Features
 - Live preview of the 24x16 grid (20 px cells) with real HA values
@@ -51,6 +53,15 @@ Editor UI: English, Polish, German, Ukrainian. Follows the HA UI language, or se
 Add a language by copying the `en` block in `TR` (top of `dist/nspanel-dom-editor.js`) – a test checks key parity.
 
 Card options: `language`, `g13_entity`, `dom_entity`, `layout_entity`, `catalog_entity`, `info_entity`, `save_script`.
+
+## Documentation
+| Doc | Topic |
+|---|---|
+| [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) | full mechanics: catalog, layout, touch, tariff, messages |
+| [docs/WEATHER-AND-SOUNDS.md](docs/WEATHER-AND-SOUNDS.md) | interactive weather sky, time of day, alarms, chimes configuration |
+| [docs/HISTORY.md](docs/HISTORY.md) | project history and design decisions |
+| [docs/BUILD-TFT.md](docs/BUILD-TFT.md) · [docs/TRANSLATING.md](docs/TRANSLATING.md) · [docs/DATA-FORMAT.md](docs/DATA-FORMAT.md) | display build, languages, data formats |
+| [flasher/](flasher/README.md) | browser flasher (experimental) |
 
 ## Languages (all parts)
 - Editor card: en, pl, de, uk (follows HA)

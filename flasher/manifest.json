@@ -1,0 +1,12 @@
+{
+  "name": "NSPanel Dom",
+  "version": "1.14.0",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "improv": true,
+      "parts": [{ "path": "firmware/nspanel-dom.factory.bin", "offset": 0 }]
+    }
+  ]
+}

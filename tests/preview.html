@@ -27,5 +27,6 @@ const el=document.createElement("nspanel-dom-editor-card");
 el.setConfig({language:lang});
 document.getElementById("app").appendChild(el);
 el.hass={language:lang,states,callService:async()=>{}};
-if(sel>=0){el._sel=sel;el._renderAll();}
+if(q.get("swap")){const a=el._tiles[2],b=el._tiles[3];[a.c,b.c]=[b.c,a.c];[a.r,b.r]=[b.r,a.r];el._dirty=true;}
+if(sel>=0||q.get("swap")){el._sel=sel;el._renderAll();}
 </script>

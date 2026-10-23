@@ -1,5 +1,9 @@
 # Changelog
 
+## docs (unreleased)
+- Added: history, detailed mechanics, weather/time-of-day/alarm/chime configuration docs (EN + PL), Polish README, animated demo GIF, experimental web flasher
+- Fixed: editor 'unsaved changes' label showed raw template text
+
 ## 1.14
 - Tariff (G13) tile: the outer ring is now a 24 h dial with zones, hour ticks, 0/6/12/18 digits and a "now" hand (replaces the day bar)
 - Editor card: multilingual UI (EN/PL/DE/UK), configurable entities (`g13_entity`, `dom_entity`, ...)

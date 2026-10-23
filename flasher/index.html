@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NSPanel Dom – web flasher</title>
+<script type="module" src="https://unpkg.com/esp-web-tools@10.0.1/dist/web/install-button.js?module"></script>
+<style>body{font-family:system-ui,sans-serif;max-width:640px;margin:2rem auto;padding:0 1rem;line-height:1.5}code{background:#eee;padding:0 .3em}</style></head>
+<body>
+<h1>NSPanel Dom – web flasher</h1>
+<p>Flash the ready-made firmware to a Sonoff NSPanel (ESP32) from your browser (Chrome / Edge, USB serial adapter connected).
+Wi-Fi is set up after flashing through the on-screen / serial provisioning (Improv). Then add the device in Home Assistant (ESPHome integration).</p>
+<esp-web-install-button manifest="manifest.json">
+  <button slot="activate">Install firmware</button>
+  <span slot="unsupported">Use Chrome or Edge on a desktop computer.</span>
+</esp-web-install-button>
+<p><b>Status: experimental.</b> The firmware binary is not published yet – see <code>flasher/README.md</code>.
+After flashing, upload the display file <code>display/nspanel_dom.tft</code> (HA button <i>Upload TFT</i>).</p>
+<p>Polski: wgraj gotowy firmware z przeglądarki (Chrome/Edge, adapter USB-UART). Po wgraniu skonfiguruj Wi-Fi (Improv), dodaj urządzenie w HA i wgraj plik <code>nspanel_dom.tft</code> przyciskiem „Wgraj TFT”.</p>
+</body></html>

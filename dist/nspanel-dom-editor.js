@@ -579,7 +579,7 @@ class NSPanelDomEditorCard extends HTMLElement {
     this._renderCanvas();
     this._renderSide();
     const $ = (id) => this.shadowRoot.getElementById(id);
-    $("msg").innerHTML = (this._dirty ? '<span class="dirty">● ${T("unsaved")}</span>' : "") + (this._msg || "");
+    $("msg").innerHTML = (this._dirty ? `<span class="dirty">● ${T("unsaved")}</span>` : "") + (this._msg || "");
     $("del").disabled = this._sel < 0;
   }
 

@@ -1,0 +1,15 @@
+# Variant for shared (web-flashed) binaries - EXPERIMENTAL, not compiled by the author yet.
+# Uses the full firmware as a package; Wi-Fi is provisioned with Improv, API encryption is removed
+# because a key baked into a public binary would be public.
+packages:
+  nspanel: !include nspanel-dom.yaml
+
+wifi:
+  ssid: !remove
+  password: !remove
+  ap: {}
+
+api:
+  encryption: !remove
+
+improv_serial:

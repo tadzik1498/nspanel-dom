@@ -3,7 +3,7 @@
 Design the NSPanel's main screen in your browser, press **Save to panel** – done.
 No YAML editing, no reflashing for layout changes.
 
-![editor](https://raw.githubusercontent.com/tadzik1498/nspanel-dom/main/docs/img/editor-en.png)
+![editor](https://raw.githubusercontent.com/tadzik1498/nspanel-dom/main/docs/img/editor-demo.gif)
 
 ## What it does
 - 24×16 grid preview of the real 480×320 screen with **live values** from your HA
