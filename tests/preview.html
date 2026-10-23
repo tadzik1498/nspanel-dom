@@ -1,0 +1,31 @@
+<!doctype html><meta charset="utf-8"><title>NSPanel Dom editor – demo</title>
+<style>body{margin:0;background:#111;font-family:Arial;color:#eee;--primary-text-color:#eee;--secondary-text-color:#aaa;--card-background-color:#1c1c1c;--primary-color:#03a9f4;--divider-color:#444}ha-card{display:block;background:#1c1c1c;border-radius:12px}</style>
+<script src="../dist/nspanel-dom-editor.js"></script>
+<body><div id="app" style="width:1100px;margin:0 auto"></div>
+<script>
+const q=new URLSearchParams(location.search), lang=q.get("lang")||"en", sel=+(q.get("sel")??-1);
+const now=new Date();
+const lay=[
+ {t:"W",c:0,r:0,w:10,h:16,o1:1},
+ {t:"V",c:10,r:0,w:7,h:8,e:"sensor.indoor",l:"Living room"},
+ {t:"B",c:17,r:0,w:7,h:8,e:"sensor.power",l:"Power",o1:0,o2:3000},
+ {t:"K",c:10,r:8,w:7,h:8,e:"climate.ac"},
+ {t:"T",c:17,r:8,w:7,h:4,e:"light.hall",l:"Hall"},
+ {t:"T",c:17,r:12,w:7,h:4,e:"scene.movie",l:"Movie"}];
+const states={
+ "sensor.nspanel_dom_uklad":{state:"ok",attributes:{uklad:lay}},
+ "sensor.nspanel_dom_katalog":{state:"ok",attributes:{uklad_domyslny:lay,glowny:{pogoda:"weather.home",klima:"climate.ac"}}},
+ "sensor.nspanel_dom_pogoda_info":{state:"Sunrise 6:48",attributes:{linia2:"Wind 12 km/h, Humidity 61%"}},
+ "weather.home":{state:"partlycloudy",attributes:{temperature:14.2}},
+ "sun.sun":{state:"above_horizon",attributes:{elevation:30}},
+ "sensor.indoor":{state:"21.6",attributes:{unit_of_measurement:"°C",friendly_name:"Indoor",device_class:"temperature"}},
+ "sensor.power":{state:"1450",attributes:{unit_of_measurement:"W",friendly_name:"Power",device_class:"power"}},
+ "climate.ac":{state:"heat",attributes:{temperature:23,target_temp_step:1,fan_mode:"medium",friendly_name:"AC"}},
+ "light.hall":{state:"on",attributes:{friendly_name:"Hall"}},
+ "scene.movie":{state:"scening",attributes:{friendly_name:"Movie"}}};
+const el=document.createElement("nspanel-dom-editor-card");
+el.setConfig({language:lang});
+document.getElementById("app").appendChild(el);
+el.hass={language:lang,states,callService:async()=>{}};
+if(sel>=0){el._sel=sel;el._renderAll();}
+</script>

@@ -7,12 +7,25 @@ Home Assistant, press **Save to panel**, and the layout is pushed to the device.
 > Status: early / personal project being opened up. Interfaces may change. Polish UI strings
 > and entity names in places – translations and generalisation are welcome contributions.
 
+![editor](https://raw.githubusercontent.com/tadzik1498/nspanel-dom/main/docs/img/editor-en.png)
+
 ## Features
 - Live preview of the 24x16 grid (20 px cells) with real HA values
 - Drag, swap, resize from any edge/corner; neighbours shrink automatically
 - Tile types: weather+clock, weather, clock, value, value with bar, switch, climate, G13 tariff dial, house
 - Entity suggestions, labels, per-tile options
 - Preview font selection uses the same algorithm as the firmware (`f_fit`), so WYSIWYG
+
+## How it works
+
+```mermaid
+flowchart LR
+  A[Lovelace card] -- save --> B[script.nspanel_dom_zapisz_uklad]
+  B --> C[sensor.nspanel_dom_uklad]
+  C --> D[ESPHome firmware] --> E[Nextion screen]
+  HA[(HA entities)] --> A
+  HA --> D
+```
 
 ## Repository layout
 | Path | What |
